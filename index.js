@@ -4,7 +4,21 @@ const fetch = require('node-fetch');
 require('dotenv').config();
 const flavorTexts = require('./flavorTexts.json');
 const fs = require('fs');
+const kpiePolygon = JSON.parse(fs.readFileSync('./geo_bounds/kpie.json', 'utf8'));
 
+const turf = require('@turf/turf');
+
+/**
+ * Check if point is inside a GeoJSON polygon
+ * @param {number} lat - Latitude of the point
+ * @param {number} lon - Longitude of the point
+ * @param {Object} polygon - A GeoJSON polygon (Feature or Geometry)
+ * @returns {boolean}
+ */
+function isPointInPolygon(lat, lon, polygon) {
+  const point = turf.point([lon, lat]); // turf uses [lng, lat]
+  return turf.booleanPointInPolygon(point, polygon);
+}
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
@@ -444,12 +458,19 @@ while (attempt < maxAttempts && !foundWater) {
   randomLat = lat + (distance / 60) * Math.cos(radians);
   randomLon = lon + (distance / (60 * Math.cos(lat * Math.PI / 180))) * Math.sin(radians);
 
-foundWater = await checkIfWaterSmart(lat, lon, randomLat, randomLon);
+  // Check if inside KPIE water bounds
+  const inBounds = isPointInPolygon(randomLat, randomLon, kpiePolygon);
+  if (!inBounds) {
+    console.log(`📍 Attempt ${attempt}: Outside KPIE polygon bounds`);
+    continue;
+  }
+
+  foundWater = await checkIfWaterSmart(lat, lon, randomLat, randomLon);
 
   if (!foundWater) {
-console.log(`🌍 Attempt ${attempt}: Over land, retrying...`);
-await sleep(1200); // ⏲️ 1.2 second delay before trying again
-	}
+    console.log(`🌍 Attempt ${attempt}: Over land, retrying...`);
+    await sleep(1200); // ⏲️ Respect API rate limit
+  }
 }
 
 if (!foundWater) {
@@ -457,6 +478,7 @@ if (!foundWater) {
   randomLat = lat;
   randomLon = lon;
 }
+
 
 const centerLat = ((lat + randomLat) / 2).toFixed(4);
 const centerLon = ((lon + randomLon) / 2).toFixed(4);
