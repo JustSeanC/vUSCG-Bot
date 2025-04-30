@@ -464,8 +464,7 @@ if (missionDuration === 'short') {
   maxNM = 300; // large upper bound, but will still be clipped by polygon size
 }
 
-while (attempt < maxAttempts && !foundWater) {
-  attempt++;
+while (!foundWater) {
   const bearing = Math.random() * 360;
   const distance = Math.max(minNM + Math.random() * (maxNM - minNM), 0.5);
   const radians = bearing * (Math.PI / 180);
@@ -473,25 +472,21 @@ while (attempt < maxAttempts && !foundWater) {
   randomLat = lat + (distance / 60) * Math.cos(radians);
   randomLon = lon + (distance / (60 * Math.cos(lat * Math.PI / 180))) * Math.sin(radians);
 
-  // Check if inside KPIE water bounds
-  let inBounds = true;
-
-  if (base === 'KPIE') {
-    const inBounds = isPointInAnyPolygon(randomLat, randomLon, kpieGeo);
-    if (!inBounds) {
-      console.log(`📍 Attempt ${attempt}: Outside KPIE polygon bounds`);
-      continue;
-    }
+  // If using KPIE and point is outside the polygon, skip and try again (no API call)
+  if (base === 'KPIE' && !isPointInAnyPolygon(randomLat, randomLon, kpieGeo)) {
+    console.log(`📍 Skipping point outside KPIE polygon bounds`);
+    continue;
   }
-  
 
+  attempt++; // Count only when API is called
   foundWater = await checkIfWaterSmart(lat, lon, randomLat, randomLon);
 
   if (!foundWater) {
     console.log(`🌍 Attempt ${attempt}: Over land, retrying...`);
-    await sleep(1200); // ⏲️ Respect API rate limit
+    await sleep(1200); // Respect API rate limit
   }
 }
+
 
 if (!foundWater) {
   console.log('⚠️ Could not find water after 5 attempts, using base coordinates.');
