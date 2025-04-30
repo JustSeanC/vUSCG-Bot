@@ -2,7 +2,7 @@
 
 set -e  # Exit if any command fails
 
-cd /root/discordbot/vuscg-bot
+cd /root/discordbot
 
 echo "📥 Pulling latest changes from dev branch..."
 git checkout dev
@@ -25,3 +25,4 @@ echo "🔄 Restarting Discord bot with PM2..."
 pm2 restart discordbot
 
 echo "✅ Update, push, and restart complete!"
+echo "💻 Current date and time: $(date)"
