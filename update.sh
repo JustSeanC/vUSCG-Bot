@@ -2,11 +2,13 @@
 
 set -e  # Exit if any command fails
 
-# Change to bot directory if needed
-cd /path/to/your/discordbot
+cd /root/discordbot/vuscg-bot
 
 echo "📥 Pulling latest changes from dev branch..."
 git checkout dev
+git add .
+git commit -m "Auto-commit before merge" || echo "🔎 No local changes to commit."
+git push origin dev
 git pull origin dev
 
 echo "🔁 Merging dev into main..."
