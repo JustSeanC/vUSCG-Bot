@@ -506,11 +506,31 @@ const centerLon = ((lon + randomLon) / 2).toFixed(4);
 objectiveText = `Depart **${base}**.\nProceed to area near coordinates **${randomLat.toFixed(4)}°N, ${Math.abs(randomLon).toFixed(4)}°W**.`;
 
 // Build the map URL with midpoint centering
+// Calculate distance for zoom level
+const toRadians = deg => deg * Math.PI / 180;
+const R = 3440.1; // NM
+const dLat = toRadians(randomLat - lat);
+const dLon = toRadians(randomLon - lon);
+const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(lat)) * Math.cos(toRadians(randomLat)) * Math.sin(dLon / 2) ** 2;
+const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+const distance = R * c;
+
+// Dynamic zoom level (approximate)
+let zoom = 9;
+if (distance < 15) zoom = 10;
+else if (distance < 30) zoom = 9;
+else if (distance < 60) zoom = 8;
+else if (distance < 120) zoom = 7;
+else zoom = 6;
+
+// Center map on midpoint
+const midLat = ((lat + randomLat) / 2).toFixed(4);
+const midLon = ((lon + randomLon) / 2).toFixed(4);
+
 mapUrl = `https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/` +
-  `pin-s+0000ff(${lon.toFixed(4)},${lat.toFixed(4)}),` +  // Blue base pin
-  `pin-s+ff0000(${randomLon.toFixed(4)},${randomLat.toFixed(4)})/` + // Red POI pin
-  `${randomLon.toFixed(4)},${randomLat.toFixed(4)},9/600x400` +
-  `?access_token=${process.env.MAPBOX_TOKEN}`;
+  `pin-s+0000ff(${lon.toFixed(4)},${lat.toFixed(4)}),` +
+  `pin-s+ff0000(${randomLon.toFixed(4)},${randomLat.toFixed(4)})/` +
+  `${midLon},${midLat},${zoom}/600x400?access_token=${process.env.MAPBOX_TOKEN}`;
 
 
     } else {
