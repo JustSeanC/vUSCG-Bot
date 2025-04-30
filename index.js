@@ -459,11 +459,16 @@ while (attempt < maxAttempts && !foundWater) {
   randomLon = lon + (distance / (60 * Math.cos(lat * Math.PI / 180))) * Math.sin(radians);
 
   // Check if inside KPIE water bounds
-  const inBounds = isPointInPolygon(randomLat, randomLon, kpiePolygon);
-  if (!inBounds) {
-    console.log(`📍 Attempt ${attempt}: Outside KPIE polygon bounds`);
-    continue;
+  let inBounds = true;
+
+  if (base === 'KPIE') {
+    inBounds = isPointInPolygon(randomLat, randomLon, kpiePolygon);
+    if (!inBounds) {
+      console.log(`📍 Attempt ${attempt}: Outside KPIE polygon bounds`);
+      continue;
+    }
   }
+  
 
   foundWater = await checkIfWaterSmart(lat, lon, randomLat, randomLon);
 
