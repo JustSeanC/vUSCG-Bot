@@ -4,7 +4,7 @@ const fetch = require('node-fetch');
 require('dotenv').config();
 const flavorTexts = require('./flavorTexts.json');
 const fs = require('fs');
-const kpiePolygon = JSON.parse(fs.readFileSync('./geo_bounds/kpie.json', 'utf8'));
+const kpieGeo = JSON.parse(fs.readFileSync('./geo_bounds/kpie.json', 'utf8'));
 
 const turf = require('@turf/turf');
 
@@ -15,10 +15,13 @@ const turf = require('@turf/turf');
  * @param {Object} polygon - A GeoJSON polygon (Feature or Geometry)
  * @returns {boolean}
  */
-function isPointInPolygon(lat, lon, polygon) {
-  const point = turf.point([lon, lat]); // turf uses [lng, lat]
-  return turf.booleanPointInPolygon(point, polygon);
+function isPointInAnyPolygon(lat, lon, featureCollection) {
+  const point = turf.point([lon, lat]);
+  return featureCollection.features.some(feature => {
+    return turf.booleanPointInPolygon(point, feature);
+  });
 }
+
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
@@ -448,11 +451,23 @@ let randomLon = lon;
 let attempt = 0;
 const maxAttempts = 5;
 let foundWater = false;
+// Distance constraints based on duration
+let minNM = 0, maxNM = 25; // default fallback
+if (missionDuration === 'short') {
+  minNM = 0;
+  maxNM = 20;
+} else if (missionDuration === 'medium') {
+  minNM = 20;
+  maxNM = 100;
+} else if (missionDuration === 'long') {
+  minNM = 80;
+  maxNM = 300; // large upper bound, but will still be clipped by polygon size
+}
 
 while (attempt < maxAttempts && !foundWater) {
   attempt++;
   const bearing = Math.random() * 360;
-  const distance = Math.random() * (25 - 5) + 5; // 5-25 NM
+  const distance = Math.max(minNM + Math.random() * (maxNM - minNM), 0.5);
   const radians = bearing * (Math.PI / 180);
 
   randomLat = lat + (distance / 60) * Math.cos(radians);
@@ -462,7 +477,7 @@ while (attempt < maxAttempts && !foundWater) {
   let inBounds = true;
 
   if (base === 'KPIE') {
-    inBounds = isPointInPolygon(randomLat, randomLon, kpiePolygon);
+    const inBounds = isPointInAnyPolygon(randomLat, randomLon, kpieGeo);
     if (!inBounds) {
       console.log(`📍 Attempt ${attempt}: Outside KPIE polygon bounds`);
       continue;
