@@ -6,7 +6,7 @@
     "Merchant ship reports flare sighted bearing 045 degrees, approximate range 15 NM.",
     "Emergency radio transmission received: vessel listing heavily.",
     "Capsized sailboat observed by commercial vessel; no contact with survivors.",
-    "EPIRB distress signal detected 18 NM east of base; immediate response requested.",
+    "EPIRB distress signal detected; immediate response requested.",
     "Small plane emergency water landing reported; survivors may be in life rafts.",
     "Lost kayakers overdue by 8 hours; last seen heading south from coastline.",
     "Cargo vessel man overboard; search pattern established around last known position.",
@@ -15,11 +15,20 @@
     "Mayday call: fishing boat engine fire, all crew abandoning ship.",
     "Request additional SAR assets if available; multiple survivors reported.",
     "Lifeboat adrift with unknown number of persons; spotted via aerial recon.",
-    "High winds reported in search area; visibility reduced below 1 NM.",
+    "High winds reported in search area; proceed with caution.",
     "Floating debris field located; survivors may be nearby.",
     "Large ferry disabled offshore; medical emergencies onboard.",
     "Sailboat missing after squall line passage; begin sector search.",
-    "Last radar contact with overdue vessel occurred 2 hours ago; area identified."
+    "Last radar contact with overdue vessel occurred 2 hours ago; area identified.",
+    "Life raft sighted via satellite imagery; crew status unknown.",
+    "Desperate mayday: child reported overboard from cruise vessel.",
+    "Survivor reports drifting for hours; coordinates unconfirmed.",
+    "Faint ELT signal detected near known crash zone—initiate aerial sweep.",
+    "Crew of disabled sailboat reports water intrusion and worsening seas.",
+    "Aircraft emergency locator transmitter (ELT) signal confirmed; last known altitude 2,000 ft, pilot unresponsive.",
+    "Survivor sighted clinging to hull in heavy surf; helo hoist may be required under adverse conditions.",
+    "Distress call from sailboat in 12-foot seas, taking on water with pumps failing — estimated 2 POB."
+
   ],
   "HITRON": [
     "Fast boat sighted, high-speed target moving northbound.",
@@ -31,7 +40,16 @@
     "Suspect vessel observed discarding contraband; recovery operations authorized.",
     "Launch at earliest opportunity to intercept suspect vessel before landfall.",
     "Intelligence reports drug transport vessel approaching coastline.",
-    "Boarding team reports vessel refusing inspection; aerial overwatch needed."
+    "Boarding team reports vessel refusing inspection; aerial overwatch needed.",
+    "Thermal imaging confirms suspect vessel operating without lights.",
+    "Intercept target before it reaches neutral waters.",
+    "Signals intelligence points to rendezvous point offshore—monitor for fast movers.",
+    "Multiple vessels matching trafficking profiles in patrol sector.",
+    "Deploy snipers and prep fast rope teams; suspect vessel may be armed.",
+    "Suspected narcotics smuggling vessel failed to heave to; marked increase in speed and evasive maneuvers.",
+    "Go-fast boat observed transiting from known trafficking vector; air asset to track until cutter arrives.",
+    "Intelligence fusion center alert: semi-submersible craft may be operating in patrol sector."
+
   ],
   "LE": [
     "Suspicious vessel loitering in known trafficking corridor.",
@@ -43,7 +61,16 @@
     "Fishing vessel ignoring boarding requests, proceed to intercept.",
     "Nighttime operations authorized; NVG equipment recommended if available.",
     "Suspect craft operating near international boundary line.",
-    "Launch boarding team to enforce maritime security zone."
+    "Launch boarding team to enforce maritime security zone.",
+    "Vessel broadcasting fake AIS credentials—verify identification.",
+    "Unpermitted explosives use detected near reef zone; respond immediately.",
+    "Recreational vessel aggressively evading inspection checkpoints.",
+    "Intercept vessel suspected of human trafficking—priority interdiction.",
+    "Maritime exclusion zone breached by unauthorized commercial fishing vessel.",
+    "Unregistered fishing vessel violating EEZ limits; boarding team to investigate for IUU fishing.",
+    "Vessel suspected of illegal charter operations; manifests and licenses to be verified on scene.",
+    "Maritime migrant smuggling operation suspected; coordination with CBP and local law enforcement initiated."
+
   ],
   "MSP": [
     "Routine shipping lane patrol; monitor for suspicious activity.",
@@ -55,7 +82,12 @@
     "Monitor coastal fishing activity for compliance.",
     "Conduct security reconnaissance along harbor approaches.",
     "Patrol designated maritime exclusion zones.",
-    "Maintain radar surveillance along main shipping corridor."
+    "Maintain radar surveillance along main shipping corridor.",
+    "Conduct hull identification spot checks along inner anchorage.",
+    "Routine traffic stop of commercial barge operating outside channel markers.",
+    "Investigate discrepancies between declared and observed cargo.",
+    "Increased traffic reported in restricted shipping lane—verify permits.",
+    "Report unusual wake activity near port infrastructure."
   ],
   "EP": [
     "Oil slick reported via satellite imaging; proceed to investigate.",
@@ -67,7 +99,16 @@
     "Observe fisheries for protected species violations.",
     "Report signs of marine life distress or mass die-off events.",
     "Monitor coastal erosion and pollution runoff patterns.",
-    "Illegal dredging activity suspected in protected waters."
+    "Illegal dredging activity suspected in protected waters.",
+    "Whale carcass drifting into shipping lane; determine cause of death.",
+    "Suspected bilge dumping within 5 NM of wildlife preserve.",
+    "Toxic bloom alert in coastal bay—confirm conditions and alert local agencies.",
+    "Derelict fishing gear endangering protected species—initiate recovery.",
+    "Observe and log vessel interactions with known marine migration path.",
+    "Confirmed crude oil discharge from disabled tanker; evaluate containment effectiveness and assist EPA.",
+    "Large number of seabirds affected by unknown contaminant; environmental response team activated.",
+    "Report of floating chemical barrels near coastal wetlands; initiate overflight and notify NOAA."
+
   ],
   "ME": [
     "Urgent medevac request from offshore platform Bravo-5.",
@@ -79,7 +120,16 @@
     "Crews report injured passenger aboard private yacht.",
     "Patient stabilized by ship's medic; aerial transport required.",
     "Medical emergency: suspected spinal injury, urgent extraction needed.",
-    "Small passenger ferry reporting multiple medical casualties."
+    "Small passenger ferry reporting multiple medical casualties.",
+    "Urgent medevac: suspected appendicitis aboard trawler offshore.",
+    "Heatstroke case reported on survey vessel; airlift needed.",
+    "Unresponsive patient post-electrical shock; time-critical transport required.",
+    "Injury from onboard explosion; priority one evac from container ship.",
+    "Request medevac for pediatric burn victim on luxury liner.",
+    "Urgent CASEVAC: crewman suffered traumatic amputation from winch system; time-critical transfer required.",
+    "Medical consult via radio: suspected sepsis following infection aboard long-range trawler.",
+    "Helo launch authorized for pediatric seizure patient aboard cruise ship offshore."
+
   ],
   "R": [
     "Reposition aircraft to forward operating base for readiness exercise.",
@@ -91,7 +141,12 @@
     "Aircraft assigned to joint training deployment site.",
     "Strategic repositioning in anticipation of SAR surge.",
     "Support repositioning to cover downed operational unit.",
-    "Forward deploy to seasonal operational theater."
+    "Forward deploy to seasonal operational theater.",
+    "Conduct weather diversion repositioning to alternate base.",
+    "Temporary reassignment to cover regional SAR shortfall.",
+    "Support redeployment of aviation detachment to interagency task force.",
+    "Aircraft repositioning following runway closure at home base.",
+    "Join international exercise staging area at forward location."
   ],
   "T": [
     "Routine SAR pattern training sortie.",
@@ -103,6 +158,11 @@
     "Instrument approach training sortie.",
     "Formation flying practice with wingman.",
     "Deck landing practice (helo ops) if available.",
-    "Simulated multi-vessel SAR training scenario."
+    "Simulated multi-vessel SAR training scenario.",
+    "SAR grid drill: simulate response to multi-location distress calls.",
+    "Crew resource management (CRM) evaluation during simulated medevac.",
+    "Night-vision goggle proficiency test in low-light conditions.",
+    "Search pattern calibration using weighted training buoys.",
+    "Simulated rescue hoist operations from moving deck platform."
   ]
 }
