@@ -4,7 +4,17 @@ const fetch = require('node-fetch');
 require('dotenv').config();
 const flavorTexts = require('./flavorTexts.json');
 const fs = require('fs');
-const kpieGeo = JSON.parse(fs.readFileSync('./geo_bounds/kpie.json', 'utf8'));
+const geoBounds = {
+  KACV: JSON.parse(fs.readFileSync('./geo_bounds/kacv.json', 'utf8')),
+  KACY: JSON.parse(fs.readFileSync('./geo_bounds/kacy.json', 'utf8')),
+  KAST: JSON.parse(fs.readFileSync('./geo_bounds/kast.json', 'utf8')),
+  KNOW: JSON.parse(fs.readFileSync('./geo_bounds/know.json', 'utf8')),
+  KOPF: JSON.parse(fs.readFileSync('./geo_bounds/kopf.json', 'utf8')),
+  KPIE: JSON.parse(fs.readFileSync('./geo_bounds/kpie.json', 'utf8')),
+  KVQQ: JSON.parse(fs.readFileSync('./geo_bounds/kvqq.json', 'utf8')),
+  PADQ: JSON.parse(fs.readFileSync('./geo_bounds/padq.json', 'utf8')),
+  PASI: JSON.parse(fs.readFileSync('./geo_bounds/pasi.json', 'utf8')),
+};
 
 const turf = require('@turf/turf');
 
@@ -473,10 +483,10 @@ while (!foundWater) {
   randomLon = lon + (distance / (60 * Math.cos(lat * Math.PI / 180))) * Math.sin(radians);
 
   // If using KPIE and point is outside the polygon, skip and try again (no API call)
-  if (base === 'KPIE' && !isPointInAnyPolygon(randomLat, randomLon, kpieGeo)) {
-    console.log(`📍 Skipping point outside KPIE polygon bounds`);
-    continue;
-  }
+  if (geoBounds[base] && !isPointInAnyPolygon(randomLat, randomLon, geoBounds[base])) {
+  console.log(`📍 Skipping point outside ${base} polygon bounds`);
+  continue;
+}
 
   attempt++; // Count only when API is called
   foundWater = await checkIfWaterSmart(lat, lon, randomLat, randomLon);
