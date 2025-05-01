@@ -4,17 +4,16 @@ const fetch = require('node-fetch');
 require('dotenv').config();
 const flavorTexts = require('./flavorTexts.json');
 const fs = require('fs');
-const geoBounds = {
-  KACV: JSON.parse(fs.readFileSync('./geo_bounds/kacv.json', 'utf8')),
-  KACY: JSON.parse(fs.readFileSync('./geo_bounds/kacy.json', 'utf8')),
-  KAST: JSON.parse(fs.readFileSync('./geo_bounds/kast.json', 'utf8')),
-  KNOW: JSON.parse(fs.readFileSync('./geo_bounds/know.json', 'utf8')),
-  KOPF: JSON.parse(fs.readFileSync('./geo_bounds/kopf.json', 'utf8')),
-  KPIE: JSON.parse(fs.readFileSync('./geo_bounds/kpie.json', 'utf8')),
-  KVQQ: JSON.parse(fs.readFileSync('./geo_bounds/kvqq.json', 'utf8')),
-  PADQ: JSON.parse(fs.readFileSync('./geo_bounds/padq.json', 'utf8')),
-  PASI: JSON.parse(fs.readFileSync('./geo_bounds/pasi.json', 'utf8')),
-};
+const path = require('path');
+const geoBounds = {};
+
+fs.readdirSync('./geo_bounds').forEach(file => {
+  if (file.endsWith('.json')) {
+    const baseCode = path.basename(file, '.json').toUpperCase();
+    geoBounds[baseCode] = JSON.parse(fs.readFileSync(`./geo_bounds/${file}`, 'utf8'));
+  }
+});
+
 
 const turf = require('@turf/turf');
 
