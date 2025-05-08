@@ -5,6 +5,7 @@ require('dotenv').config();
 const flavorTexts = require('./flavorTexts.json');
 const fs = require('fs');
 const path = require('path');
+const BACKUP_TAG_FILE = './.last_backup_date';
 const runBackup = require('./dbBackup');
 const geoBounds = {};
 
@@ -152,24 +153,44 @@ async function checkIfWaterSmart(baseLat, baseLon, checkLat, checkLon) {
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 
-  // Schedule first backup at 3:00 AM local time
   const now = new Date();
+  const todayStr = now.toISOString().split('T')[0]; // e.g., "2025-05-08"
+
+  // Check if backup already ran today
+  let lastBackupDate = '';
+  if (fs.existsSync(BACKUP_TAG_FILE)) {
+    lastBackupDate = fs.readFileSync(BACKUP_TAG_FILE, 'utf8').trim();
+  }
+
+  if (lastBackupDate === todayStr) {
+    console.log(`[⏭️] Backup already completed today (${todayStr}), skipping.`);
+    return;
+  }
+
+  // Schedule first backup at 3:00 AM
   const targetHour = 3;
   const targetTime = new Date(now);
   targetTime.setHours(targetHour, 0, 0, 0);
   if (targetTime <= now) targetTime.setDate(targetTime.getDate() + 1);
   const initialDelay = targetTime - now;
 
+  console.log(`[⏳] Backup scheduled in ${(initialDelay / 1000 / 60).toFixed(1)} minutes.`);
+
   setTimeout(() => {
-    runBackup(client); // first run at 3AM
+    runBackup(client);
+    fs.writeFileSync(BACKUP_TAG_FILE, todayStr); // mark backup complete
+    console.log(`[✅] Backup complete and tag written.`);
 
+    // Schedule every 24h from now on
     setInterval(() => {
-      runBackup(client); // repeat every 24 hours
-    }, 24 * 60 * 60 * 1000); // every 24h
-
-    console.log(`[+] Daily backup scheduled for 3:00 AM.`);
+      runBackup(client);
+      const newDate = new Date().toISOString().split('T')[0];
+      fs.writeFileSync(BACKUP_TAG_FILE, newDate);
+      console.log(`[✅] Backup complete and tag updated.`);
+    }, 24 * 60 * 60 * 1000);
   }, initialDelay);
 });
+
 
  
 client.on('interactionCreate', async interaction => {
