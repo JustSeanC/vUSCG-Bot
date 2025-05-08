@@ -154,20 +154,6 @@ client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 
   const now = new Date();
-  const todayStr = now.toISOString().split('T')[0]; // e.g., "2025-05-08"
-
-  // Check if backup already ran today
-  let lastBackupDate = '';
-  if (fs.existsSync(BACKUP_TAG_FILE)) {
-    lastBackupDate = fs.readFileSync(BACKUP_TAG_FILE, 'utf8').trim();
-  }
-
-  if (lastBackupDate === todayStr) {
-    console.log(`[⏭️] Backup already completed today (${todayStr}), skipping.`);
-    return;
-  }
-
-  // Schedule first backup at 3:00 AM
   const targetHour = 3;
   const targetTime = new Date(now);
   targetTime.setHours(targetHour, 0, 0, 0);
@@ -177,22 +163,30 @@ client.once('ready', () => {
   console.log(`[⏳] Backup scheduled in ${(initialDelay / 1000 / 60).toFixed(1)} minutes.`);
 
   setTimeout(() => {
-    runBackup(client);
-    fs.writeFileSync(BACKUP_TAG_FILE, todayStr); // mark backup complete
-    console.log(`[✅] Backup complete and tag written.`);
+    const today = new Date().toISOString().split('T')[0];
+    const lastBackup = fs.existsSync(BACKUP_TAG_FILE)
+      ? fs.readFileSync(BACKUP_TAG_FILE, 'utf8').trim()
+      : '';
 
-    // Schedule every 24h from now on
-    setInterval(() => {
+    if (lastBackup === today) {
+      console.log(`[⏭️] Skipping backup — already done today (${today})`);
+    } else {
       runBackup(client);
-      const newDate = new Date().toISOString().split('T')[0];
-      fs.writeFileSync(BACKUP_TAG_FILE, newDate);
+      fs.writeFileSync(BACKUP_TAG_FILE, today);
+      console.log(`[✅] Backup complete and tag updated.`);
+    }
+
+    // Repeat daily
+    setInterval(() => {
+      const newToday = new Date().toISOString().split('T')[0];
+      runBackup(client);
+      fs.writeFileSync(BACKUP_TAG_FILE, newToday);
       console.log(`[✅] Backup complete and tag updated.`);
     }, 24 * 60 * 60 * 1000);
   }, initialDelay);
 });
 
 
- 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
