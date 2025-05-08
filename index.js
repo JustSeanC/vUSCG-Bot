@@ -5,6 +5,7 @@ require('dotenv').config();
 const flavorTexts = require('./flavorTexts.json');
 const fs = require('fs');
 const path = require('path');
+const runBackup = require('./dbBackup');
 const geoBounds = {};
 
 fs.readdirSync('./geo_bounds').forEach(file => {
@@ -151,7 +152,24 @@ async function checkIfWaterSmart(baseLat, baseLon, checkLat, checkLon) {
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 });
+  // Schedule first backup at 3:00 AM local time
+  const now = new Date();
+  const targetHour = 3;
+  const targetTime = new Date(now);
+  targetTime.setHours(targetHour, 0, 0, 0);
+  if (targetTime <= now) targetTime.setDate(targetTime.getDate() + 1);
+  const initialDelay = targetTime - now;
 
+  setTimeout(() => {
+    runBackup(client); // first run at 3AM
+
+    setInterval(() => {
+      runBackup(client); // repeat every 24 hours
+    }, 24 * 60 * 60 * 1000); // every 24h
+  }, initialDelay);
+
+  console.log(`[+] Daily backup scheduled for 3:00 AM.`);
+});
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -160,6 +178,7 @@ client.on('interactionCreate', async interaction => {
 
   const pilotId = interaction.options.getInteger('pilot_id');
   const targetUser = interaction.options.getUser('user');
+
 
   // ===== /activate =====
   if (interaction.commandName === 'activate') {
