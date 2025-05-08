@@ -151,7 +151,7 @@ async function checkIfWaterSmart(baseLat, baseLon, checkLat, checkLon) {
 
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
-});
+
   // Schedule first backup at 3:00 AM local time
   const now = new Date();
   const targetHour = 3;
@@ -166,10 +166,12 @@ client.once('ready', () => {
     setInterval(() => {
       runBackup(client); // repeat every 24 hours
     }, 24 * 60 * 60 * 1000); // every 24h
-  }, initialDelay);
 
-  console.log(`[+] Daily backup scheduled for 3:00 AM.`);
+    console.log(`[+] Daily backup scheduled for 3:00 AM.`);
+  }, initialDelay);
 });
+
+ 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
