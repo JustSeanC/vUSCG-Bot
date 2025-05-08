@@ -149,7 +149,6 @@ async function checkIfWaterSmart(baseLat, baseLon, checkLat, checkLon) {
   }
 }
 
-
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 
@@ -176,15 +175,25 @@ client.once('ready', () => {
       console.log(`[✅] Backup complete and tag updated.`);
     }
 
-    // Repeat daily
+    // Schedule repeating backups every 24 hours (with safety check)
     setInterval(() => {
       const newToday = new Date().toISOString().split('T')[0];
+      const last = fs.existsSync(BACKUP_TAG_FILE)
+        ? fs.readFileSync(BACKUP_TAG_FILE, 'utf8').trim()
+        : '';
+
+      if (last === newToday) {
+        console.log(`[⏭️] Skipping daily backup — already done today (${newToday})`);
+        return;
+      }
+
       runBackup(client);
       fs.writeFileSync(BACKUP_TAG_FILE, newToday);
-      console.log(`[✅] Backup complete and tag updated.`);
+      console.log(`[✅] Daily backup complete and tag updated.`);
     }, 24 * 60 * 60 * 1000);
   }, initialDelay);
 });
+
 
 
 client.on('interactionCreate', async interaction => {
