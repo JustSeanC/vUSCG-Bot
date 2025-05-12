@@ -40,22 +40,22 @@ async function runBackup(client) {
 
       console.log(`[+] Backup zipped: ${zipFilePath}`);
 
-      try {
-        const channel = await client.channels.fetch(CHANNEL_ID);
-        const file = new AttachmentBuilder()
-        .setFile(fs.readFileSync(zipFilePath))
-        .setName(path.basename(zipFilePath));
+     try {
+  const channel = await client.channels.fetch(CHANNEL_ID);
+  const file = new AttachmentBuilder(fs.readFileSync(zipFilePath), {
+    name: path.basename(zipFilePath),
+  });
 
-      await channel.send({
-        content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
-        files: [file],
-      });
+  await channel.send({
+    content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
+    files: [file],
+  });
 
+  console.log(`[+] Backup posted to Discord.`);
+} catch (e) {
+  console.error(`Discord post failed: ${e.message}`);
+}
 
-        console.log(`[+] Backup posted to Discord.`);
-      } catch (e) {
-        console.error(`Discord post failed: ${e.message}`);
-      }
 
       fs.unlinkSync(filepath); // Delete raw .sql file
 
