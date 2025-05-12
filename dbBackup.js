@@ -42,13 +42,15 @@ async function runBackup(client) {
 
       try {
         const channel = await client.channels.fetch(CHANNEL_ID);
-        const fileBuffer = fs.readFileSync(zipFilePath);
-const file = new AttachmentBuilder(fileBuffer, { name: path.basename(zipFilePath) });
+        const file = new AttachmentBuilder()
+        .setFile(fs.readFileSync(zipFilePath))
+        .setName(path.basename(zipFilePath));
 
-await channel.send({
-  content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
-  files: [file],
-});
+      await channel.send({
+        content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
+        files: [file],
+      });
+
 
         console.log(`[+] Backup posted to Discord.`);
       } catch (e) {
