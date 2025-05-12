@@ -73,6 +73,9 @@ async function runBackup(client) {
 module.exports = runBackup;
 
 if (require.main === module) {
+  // 👇 Add this again to ensure it's loaded in direct runs
+  require('dotenv').config();
+
   const { Client, GatewayIntentBits } = require('discord.js');
 
   const client = new Client({
@@ -82,8 +85,9 @@ if (require.main === module) {
   client.once('ready', async () => {
     console.log(`✅ Connected as ${client.user.tag}`);
     await runBackup(client);
-    client.destroy(); // Close Discord connection after posting
+    client.destroy(); // Close the bot after uploading
   });
 
   client.login(process.env.DISCORD_TOKEN);
 }
+
