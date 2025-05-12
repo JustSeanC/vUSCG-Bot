@@ -42,6 +42,7 @@ async function runBackup(client) {
 
      try {
   const channel = await client.channels.fetch(CHANNEL_ID);
+
   const file = new AttachmentBuilder(fs.readFileSync(zipFilePath), {
     name: path.basename(zipFilePath),
   });
@@ -55,6 +56,7 @@ async function runBackup(client) {
 } catch (e) {
   console.error(`Discord post failed: ${e.message}`);
 }
+
 
 
       fs.unlinkSync(filepath); // Delete raw .sql file
