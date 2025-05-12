@@ -71,3 +71,19 @@ async function runBackup(client) {
 }
 
 module.exports = runBackup;
+
+if (require.main === module) {
+  const { Client, GatewayIntentBits } = require('discord.js');
+
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds],
+  });
+
+  client.once('ready', async () => {
+    console.log(`✅ Connected as ${client.user.tag}`);
+    await runBackup(client);
+    client.destroy(); // Close Discord connection after posting
+  });
+
+  client.login(process.env.DISCORD_TOKEN);
+}
