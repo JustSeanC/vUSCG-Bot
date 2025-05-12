@@ -14,6 +14,8 @@ const CHANNEL_ID = process.env.DB_BACKUP_ID;
 
 if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR);
 
+const { execSync } = require('child_process');
+
 async function runBackup(client) {
   const timestamp = new Date().toISOString().split('T')[0];
   const filename = `${DB_NAME}_${timestamp}.sql`;
@@ -22,60 +24,59 @@ async function runBackup(client) {
 
   console.log(`[+] Starting backup for tables: aircraft, pireps, users`);
 
-  const dumpCmd = `mysqldump -h ${DB_HOST} -u ${DB_USER} -p${DB_PASS} ${DB_NAME} aircraft pireps users > ${filepath}`;
-  exec(dumpCmd, (err) => {
-    if (err) {
-      console.error(`Backup failed: ${err.message}`);
-      return;
-    }
-
+  try {
+    execSync(`mysqldump -h ${DB_HOST} -u ${DB_USER} -p${DB_PASS} ${DB_NAME} aircraft pireps users > ${filepath}`);
     console.log(`[+] SQL backup saved: ${filename}`);
+  } catch (err) {
+    console.error(`❌ Backup failed: ${err.message}`);
+    return;
+  }
 
-    const zipCmd = `zip -j ${zipFilePath} ${filepath}`;
-    exec(zipCmd, async (zipErr) => {
-      if (zipErr) {
-        console.error(`ZIP failed: ${zipErr.message}`);
-        return;
-      }
+  try {
+    execSync(`zip -j ${zipFilePath} ${filepath}`);
+    console.log(`[+] Backup zipped: ${zipFilePath}`);
+  } catch (err) {
+    console.error(`❌ ZIP failed: ${err.message}`);
+    return;
+  }
 
-      console.log(`[+] Backup zipped: ${zipFilePath}`);
-
-     try {
-  const channel = await client.channels.fetch(CHANNEL_ID);
-
-  const file = new AttachmentBuilder(fs.readFileSync(zipFilePath), {
-    name: path.basename(zipFilePath),
-  });
-
-  await channel.send({
-    content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
-    files: [file],
-  });
-
-  console.log(`[+] Backup posted to Discord.`);
-} catch (e) {
-  console.error(`Discord post failed: ${e.message}`);
-}
-
-
-
-      fs.unlinkSync(filepath); // Delete raw .sql file
-
-      // Delete old backups (older than 3 days)
-      const now = Date.now();
-      const cutoff = 3 * 24 * 60 * 60 * 1000;
-
-      fs.readdirSync(BACKUP_DIR).forEach(file => {
-        const fullPath = path.join(BACKUP_DIR, file);
-        const stats = fs.statSync(fullPath);
-        if (now - stats.mtimeMs > cutoff) {
-          fs.unlinkSync(fullPath);
-          console.log(`[+] Deleted old backup: ${file}`);
-        }
-      });
+  try {
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    const file = new AttachmentBuilder(fs.readFileSync(zipFilePath), {
+      name: path.basename(zipFilePath),
     });
+
+    await channel.send({
+      content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
+      files: [file],
+    });
+
+    console.log(`[+] Backup posted to Discord.`);
+  } catch (e) {
+    console.error(`❌ Discord post failed: ${e.message}`);
+    return;
+  }
+
+  // Cleanup
+  try {
+    fs.unlinkSync(filepath); // delete .sql
+  } catch (err) {
+    console.warn(`⚠️ Could not delete raw SQL file: ${err.message}`);
+  }
+
+  const now = Date.now();
+  const cutoff = 3 * 24 * 60 * 60 * 1000;
+
+  fs.readdirSync(BACKUP_DIR).forEach(file => {
+    const fullPath = path.join(BACKUP_DIR, file);
+    const stats = fs.statSync(fullPath);
+    if (now - stats.mtimeMs > cutoff) {
+      fs.unlinkSync(fullPath);
+      console.log(`[+] Deleted old backup: ${file}`);
+    }
   });
 }
+
 
 module.exports = runBackup;
 
