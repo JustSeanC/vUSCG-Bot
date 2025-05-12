@@ -122,32 +122,44 @@ async function checkIfWaterSmart(baseLat, baseLon, checkLat, checkLon) {
   }
 
   try {
-    // Log API usage!
-    await logApiUsageIfNeeded(client); // 👈 (you must pass your client instance)
+    // Log API usage
+    await logApiUsageIfNeeded(client);
 
     const url = `https://isitwater-com.p.rapidapi.com/?latitude=${checkLat}&longitude=${checkLon}`;
+    console.log(`🌐 Fetching IsItWater for (${checkLat.toFixed(4)}, ${checkLon.toFixed(4)})`);
+
+    // Add timeout protection
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5 sec timeout
+
     const response = await fetch(url, {
       method: 'GET',
       headers: {
         'x-rapidapi-host': 'isitwater-com.p.rapidapi.com',
         'x-rapidapi-key': apiKey,
       },
+      signal: controller.signal,
     });
 
+    clearTimeout(timeout); // Cancel timeout when request finishes
+
     const data = await response.json();
+    console.log('📬 IsItWater response received:', data);
 
     if (typeof data.water === 'boolean') {
-      console.log(`🌊 IsItWater: (${checkLat}, ${checkLon}) = ${data.water ? 'WATER' : 'LAND'}`);
+      console.log(`🌊 IsItWater: (${checkLat.toFixed(4)}, ${checkLon.toFixed(4)}) = ${data.water ? 'WATER' : 'LAND'}`);
       return data.water;
     } else {
       console.warn('⚠️ Unexpected IsItWater API response:', data);
       return false;
     }
+
   } catch (error) {
-    console.error('❌ IsItWater API error:', error);
+    console.error('❌ IsItWater API error (timeout or network?):', error);
     return false;
   }
 }
+
 
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
