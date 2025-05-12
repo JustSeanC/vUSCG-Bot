@@ -42,11 +42,14 @@ async function runBackup(client) {
 
       try {
         const channel = await client.channels.fetch(CHANNEL_ID);
-        const file = new AttachmentBuilder(zipFilePath);
-        await channel.send({
-          content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
-          files: [file],
-        });
+        const fileBuffer = fs.readFileSync(zipFilePath);
+const file = new AttachmentBuilder(fileBuffer, { name: path.basename(zipFilePath) });
+
+await channel.send({
+  content: `Backup for **${timestamp}** (Tables: aircraft, pireps, users)`,
+  files: [file],
+});
+
         console.log(`[+] Backup posted to Discord.`);
       } catch (e) {
         console.error(`Discord post failed: ${e.message}`);
