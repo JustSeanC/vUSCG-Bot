@@ -247,6 +247,8 @@ client.on('interactionCreate', async interaction => {
       await thread.members.add(`251218149054087169`);
       await thread.members.add('347188501659254791');
       await thread.members.add('396783529327067136');
+      await thread.members.add('365607493138907137');
+      await thread.members.add('474043025287282688');
       
       await thread.send(`Welcome <@${targetUser.id}> - your account has been activated and you are ready to begin training. Please view <#${welcomeGuideChannelId}> for our ACARS information and just let us know here which training path you would like to follow first – Fixed Wing or Rotary Wing.`);
 
