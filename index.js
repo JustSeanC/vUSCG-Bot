@@ -216,6 +216,53 @@ client.on('interactionCreate', async interaction => {
   const pilotId = interaction.options.getInteger('pilot_id');
   const targetUser = interaction.options.getUser('user');
 
+// ===== /forceranksync =====
+if (interaction.commandName === 'forceranksync') {
+  if (!staff.roles.cache.has(adminRoleId)) {
+    return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+  }
+
+  try {
+    await interaction.deferReply();
+
+    // Get all ranks with thresholds
+    const [ranks] = await db.query(
+      'SELECT id, min_hours FROM ranks ORDER BY min_hours ASC'
+    );
+
+    // Get all active pilots
+    const [pilots] = await db.query(
+      'SELECT id, pilot_id, rank_id, flight_time FROM users WHERE state = 1'
+    );
+
+    let updatedCount = 0;
+
+    for (const pilot of pilots) {
+      const hours = pilot.flight_time / 60; // minutes → hours
+      let newRankId = pilot.rank_id;
+
+      for (const rank of ranks) {
+        if (hours >= rank.min_hours) {
+          newRankId = rank.id;
+        }
+      }
+
+      if (newRankId !== pilot.rank_id) {
+        await db.query('UPDATE users SET rank_id = ? WHERE id = ?', [newRankId, pilot.id]);
+        updatedCount++;
+        console.log(`✅ Updated C${pilot.pilot_id} → rank_id ${newRankId}`);
+      }
+    }
+
+    await interaction.editReply({
+      content: `✅ Force rank sync complete. ${updatedCount} pilots updated.`,
+    });
+
+  } catch (err) {
+    console.error('❌ Error in forceranksync:', err);
+    await interaction.editReply({ content: '❌ An error occurred during force rank sync.' });
+  }
+}
 
   // ===== /activate =====
   if (interaction.commandName === 'activate') {

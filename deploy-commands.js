@@ -107,6 +107,12 @@ new SlashCommandBuilder()
         .setRequired(true)
     )
     .toJSON(),
+
+    new SlashCommandBuilder()
+  .setName('forceranksync')
+  .setDescription('Force recalculation of all pilot ranks based on hours (Admin only)')
+  .toJSON(),
+
 ];
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
