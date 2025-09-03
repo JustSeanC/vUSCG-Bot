@@ -227,12 +227,12 @@ if (interaction.commandName === 'forceranksync') {
 
     // Get all ranks with thresholds
     const [ranks] = await db.query(
-      'SELECT id, min_hours FROM ranks ORDER BY min_hours ASC'
+      'SELECT id, min_hours FROM phpvms_ranks ORDER BY min_hours ASC'
     );
 
     // Get all active pilots
     const [pilots] = await db.query(
-      'SELECT id, pilot_id, rank_id, flight_time FROM users WHERE state = 1'
+      'SELECT id, pilot_id, rank_id, flight_time FROM phpvms_users WHERE state = 1'
     );
 
     let updatedCount = 0;
@@ -248,7 +248,7 @@ if (interaction.commandName === 'forceranksync') {
       }
 
       if (newRankId !== pilot.rank_id) {
-        await db.query('UPDATE users SET rank_id = ? WHERE id = ?', [newRankId, pilot.id]);
+        await db.query('UPDATE phpvms_users SET rank_id = ? WHERE id = ?', [newRankId, pilot.id]);
         updatedCount++;
         console.log(`✅ Updated C${pilot.pilot_id} → rank_id ${newRankId}`);
       }
@@ -263,6 +263,7 @@ if (interaction.commandName === 'forceranksync') {
     await interaction.editReply({ content: '❌ An error occurred during force rank sync.' });
   }
 }
+
 
   // ===== /activate =====
   if (interaction.commandName === 'activate') {

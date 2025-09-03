@@ -10,14 +10,9 @@ const rankRoles = {
   17: "1412809322357850255", // O-6 CAPT
 };
 
-// Roles that should never be removed
-const permanentRoles = [
-  "1174513368992862218", // vUSCG Pilot (Line Pilot badge)
-];
-
 async function syncRanks(client, db, guildId) {
   const guild = await client.guilds.fetch(guildId);
-  await guild.members.fetch(); // ensure member cache is filled
+  await guild.members.fetch(); // populate cache
 
   // Pull active pilots
   const [rows] = await db.query(
@@ -27,7 +22,7 @@ async function syncRanks(client, db, guildId) {
   for (const pilot of rows) {
     try {
       const nicknamePrefix = `C${pilot.pilot_id}`;
-      const member = guild.members.cache.find(m => 
+      const member = guild.members.cache.find(m =>
         m.nickname && m.nickname.startsWith(nicknamePrefix)
       );
 
@@ -50,13 +45,6 @@ async function syncRanks(client, db, guildId) {
       if (desiredRank && !member.roles.cache.has(desiredRank)) {
         await member.roles.add(desiredRank).catch(() => {});
         console.log(`✅ Synced ${member.user.tag} → rank_id ${pilot.rank_id}`);
-      }
-
-      // Ensure permanent roles are always present
-      for (const permRole of permanentRoles) {
-        if (!member.roles.cache.has(permRole)) {
-          await member.roles.add(permRole).catch(() => {});
-        }
       }
 
     } catch (err) {
