@@ -8,6 +8,8 @@ const path = require('path');
 const BACKUP_TAG_FILE = './.last_backup_date';
 const runBackup = require('./dbBackup');
 const geoBounds = {};
+const syncRanks = require('./rankSync');
+
 
 fs.readdirSync('./geo_bounds').forEach(file => {
   if (file.endsWith('.json')) {
@@ -160,6 +162,13 @@ client.once('ready', () => {
   targetTime.setHours(targetHour, 0, 0, 0);
   if (targetTime <= now) targetTime.setDate(targetTime.getDate() + 1);
   const initialDelay = targetTime - now;
+// Run rank sync once on startup
+syncRanks(client, db, process.env.GUILD_ID);
+
+// Run every hour
+setInterval(() => {
+  syncRanks(client, db, process.env.GUILD_ID);
+}, 60 * 60 * 1000);
 
   console.log(`[⏳] Backup scheduled in ${(initialDelay / 1000 / 60).toFixed(1)} minutes.`);
 
@@ -226,7 +235,7 @@ client.on('interactionCreate', async interaction => {
 
       await interaction.deferReply();
 
-      await db.query('UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?', [1, 1, pilotId]);
+      await db.query('UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?', [1, 12, pilotId]);
 
       const member = await interaction.guild.members.fetch(targetUser.id);
       await member.setNickname(nickname);
@@ -267,51 +276,57 @@ client.on('interactionCreate', async interaction => {
   }
 
   // ===== /promote =====
-  if (interaction.commandName === 'promote') {
-    if (!staff.roles.cache.has(adminRoleId)) {
-      return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+if (interaction.commandName === 'promote') {
+  if (!staff.roles.cache.has(adminRoleId)) {
+    return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+  }
+
+  const track = interaction.options.getString('track');
+  const rolePilot  = '1174513368992862218'; // vUSCG Pilot (permanent identity)
+  const roleCadet  = '1174513529253007370'; // Cadet (O-1)
+  const roleRotary = '1210792334749601862'; // Rotary Wing
+  const roleFixed  = '1210792296199749672'; // Fixed Wing
+  const roleO2     = '1412811531925717245'; // O-2 LTJG
+
+  try {
+    const [rows] = await db.query('SELECT name FROM users WHERE pilot_id = ?', [pilotId]);
+    if (rows.length === 0) {
+      return interaction.reply({ content: `❌ No user found with Pilot ID ${pilotId}`, ephemeral: true });
     }
 
-    const track = interaction.options.getString('track');
-    const rolePilot = '1174513368992862218';
-    const roleCadet = '1174513529253007370';
-    const roleRotary = '1210792334749601862';
-    const roleFixed = '1210792296199749672';
+    const fullName = rows[0].name.trim();
+    const [firstName, ...lastParts] = fullName.split(' ');
+    const lastInitial = lastParts.length ? lastParts[0][0].toUpperCase() : '';
+    const nickname = `C${pilotId} ${firstName} ${lastInitial}`;
 
+    await interaction.deferReply();
+
+    // DB → update to O-2 LTJG (phpVMS rank_id = 13)
+    await db.query('UPDATE users SET rank_id = ? WHERE pilot_id = ?', [13, pilotId]);
+
+    // Discord
+    const member = await interaction.guild.members.fetch(targetUser.id);
+    await member.setNickname(nickname);
+
+    await member.roles.remove(roleCadet);                       // Remove Cadet
+    await member.roles.add(rolePilot);                          // Add Pilot (permanent identity)
+    await member.roles.add(roleO2);                             // Add O-2 LTJG
+    await member.roles.add(track === 'rotary' ? roleRotary : roleFixed); // Add specialization
+
+    await interaction.editReply({
+      content: `✅ Promoted <@${targetUser.id}> to **O-2 LTJG** – ${track === 'rotary' ? 'Rotary Wing' : 'Fixed Wing'}`,
+    });
+
+  } catch (err) {
+    console.error('❌ Error in promote command:', err);
     try {
-      const [rows] = await db.query('SELECT name FROM users WHERE pilot_id = ?', [pilotId]);
-      if (rows.length === 0) {
-        return interaction.reply({ content: `❌ No user found with Pilot ID ${pilotId}`, ephemeral: true });
-      }
-
-      const fullName = rows[0].name.trim();
-      const [firstName, ...lastParts] = fullName.split(' ');
-      const lastInitial = lastParts.length ? lastParts[0][0].toUpperCase() : '';
-      const nickname = `C${pilotId} ${firstName} ${lastInitial}`;
-
-      await interaction.deferReply();
-
-      await db.query('UPDATE users SET rank_id = ? WHERE pilot_id = ?', [2, pilotId]);
-
-      const member = await interaction.guild.members.fetch(targetUser.id);
-      await member.setNickname(nickname);
-      await member.roles.add(rolePilot);
-      await member.roles.remove(roleCadet);
-      await member.roles.add(track === 'rotary' ? roleRotary : roleFixed);
-
-      await interaction.editReply({
-        content: `✅ Promoted <@${targetUser.id}> to **vUSCG Pilot** – ${track === 'rotary' ? 'Rotary Wing' : 'Fixed Wing'}`,
-      });
-
-    } catch (err) {
-      console.error('❌ Error in promote command:', err);
-      try {
-        await interaction.editReply({ content: '❌ An error occurred during promotion.' });
-      } catch {
-        console.warn('⚠️ Interaction expired before bot could reply.');
-      }
+      await interaction.editReply({ content: '❌ An error occurred during promotion.' });
+    } catch {
+      console.warn('⚠️ Interaction expired before bot could reply.');
     }
   }
+}
+
 
 // ===== /location =====
 if (interaction.commandName === 'location') {
