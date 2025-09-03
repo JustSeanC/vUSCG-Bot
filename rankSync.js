@@ -17,16 +17,24 @@ const permanentRoles = [
 
 async function syncRanks(client, db, guildId) {
   const guild = await client.guilds.fetch(guildId);
+  await guild.members.fetch(); // ensure member cache is filled
 
   // Pull active pilots
   const [rows] = await db.query(
-    "SELECT pilot_id, discord_id, rank_id FROM users WHERE state = 1"
+    "SELECT pilot_id, rank_id FROM users WHERE state = 1"
   );
 
   for (const pilot of rows) {
     try {
-      const member = await guild.members.fetch(pilot.discord_id).catch(() => null);
-      if (!member) continue;
+      const nicknamePrefix = `C${pilot.pilot_id}`;
+      const member = guild.members.cache.find(m => 
+        m.nickname && m.nickname.startsWith(nicknamePrefix)
+      );
+
+      if (!member) {
+        console.warn(`⚠️ Skipping pilot ${pilot.pilot_id} — no Discord member with nickname ${nicknamePrefix}…`);
+        continue;
+      }
 
       const desiredRank = rankRoles[pilot.rank_id] || null;
 
@@ -55,6 +63,8 @@ async function syncRanks(client, db, guildId) {
       console.error(`❌ Error syncing pilot ${pilot.pilot_id}:`, err.message);
     }
   }
+
+  console.log(`[⏰ Rank Sync] Completed at ${new Date().toLocaleTimeString()}`);
 }
 
 module.exports = syncRanks;
