@@ -219,15 +219,18 @@ client.on('interactionCreate', async interaction => {
 // ===== /forceranksync =====
 if (interaction.commandName === 'forceranksync') {
   if (!staff.roles.cache.has(adminRoleId)) {
-    return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+    return interaction.reply({
+      content: '❌ You do not have permission to use this command.',
+      ephemeral: true
+    });
   }
 
   try {
     await interaction.deferReply();
 
-    // Get all ranks with thresholds
+    // ✅ Only pull O-3 → O-6 ranks
     const [ranks] = await db.query(
-      'SELECT id, hours FROM ranks ORDER BY hours ASC'
+      'SELECT id, hours FROM ranks WHERE id IN (14, 15, 16, 17) ORDER BY hours ASC'
     );
 
     // Get all active pilots
@@ -238,9 +241,10 @@ if (interaction.commandName === 'forceranksync') {
     let updatedCount = 0;
 
     for (const pilot of pilots) {
-      const hours = pilot.flight_time / 60; // convert minutes → hours
+      const hours = pilot.flight_time / 60; // minutes → hours
       let newRankId = pilot.rank_id;
 
+      // Only consider O-3 → O-6
       for (const rank of ranks) {
         if (hours >= rank.hours) {
           newRankId = rank.id;
@@ -248,21 +252,30 @@ if (interaction.commandName === 'forceranksync') {
       }
 
       if (newRankId !== pilot.rank_id) {
-        await db.query('UPDATE users SET rank_id = ? WHERE id = ?', [newRankId, pilot.id]);
+        await db.query('UPDATE users SET rank_id = ? WHERE id = ?', [
+          newRankId,
+          pilot.id
+        ]);
         updatedCount++;
-        console.log(`✅ Updated C${pilot.pilot_id} → rank_id ${newRankId}`);
+        console.log(
+          `✅ Updated C${pilot.pilot_id} to rank_id ${newRankId} (${hours.toFixed(
+            1
+          )} hrs)`
+        );
       }
     }
 
     await interaction.editReply({
-      content: `✅ Force rank sync complete. ${updatedCount} pilots updated.`,
+      content: `✅ Force rank sync complete. ${updatedCount} pilots updated.`
     });
-
   } catch (err) {
     console.error('❌ Error in forceranksync:', err);
-    await interaction.editReply({ content: '❌ An error occurred during force rank sync.' });
+    await interaction.editReply({
+      content: '❌ An error occurred during force rank sync.'
+    });
   }
 }
+
 
 
   // ===== /activate =====
