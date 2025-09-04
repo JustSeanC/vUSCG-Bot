@@ -14,20 +14,13 @@ async function syncRanks(client, db, guildId) {
   const guild = await client.guilds.fetch(guildId);
   await guild.members.fetch(); // populate cache
 
-  // Pull active pilots
-  const [rows] = await db.query(
-  "SELECT pilot_id, rank_id, flight_time FROM users WHERE state = 1"
+// Pull active (state=1) and on-leave (state=3) pilots
+const [rows] = await db.query(
+  "SELECT pilot_id, rank_id, flight_time, state FROM users WHERE state IN (1,3) AND pilot_id >= 2000"
 );
 
-
-  for (const pilot of rows) {
+for (const pilot of rows) {
   try {
-    // Skip leadership / special accounts
-    if (pilot.pilot_id < 2000) {
-      console.log(`⏭️ Skipping leadership/special pilot C${pilot.pilot_id}`);
-      continue;
-    }
-
     const expectedNickname = `C${pilot.pilot_id} `;
     const member = guild.members.cache.find(m =>
       m.nickname && m.nickname.startsWith(expectedNickname)
@@ -40,7 +33,7 @@ async function syncRanks(client, db, guildId) {
 
     const hours = pilot.flight_time / 60;
     console.log(
-      `🔍 Sync check → Pilot C${pilot.pilot_id} | DB rank_id=${pilot.rank_id} | flight_time=${pilot.flight_time} mins (~${hours.toFixed(1)} hrs)`
+      `🔍 Sync check → Pilot C${pilot.pilot_id} | DB rank_id=${pilot.rank_id} | state=${pilot.state} | flight_time=${pilot.flight_time} mins (~${hours.toFixed(1)} hrs)`
     );
 
     let effectiveRankId = pilot.rank_id;
@@ -70,6 +63,7 @@ async function syncRanks(client, db, guildId) {
     console.error(`❌ Error syncing pilot ${pilot.pilot_id}:`, err.message);
   }
 }
+
 
 
 
