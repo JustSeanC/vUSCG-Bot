@@ -16,8 +16,9 @@ async function syncRanks(client, db, guildId) {
 
   // Pull active pilots
   const [rows] = await db.query(
-"SELECT pilot_id, rank_id FROM users WHERE state = 1"
-  );
+  "SELECT pilot_id, rank_id, flight_time FROM users WHERE state = 1"
+);
+
 
   for (const pilot of rows) {
   try {
