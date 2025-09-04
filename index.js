@@ -227,28 +227,28 @@ if (interaction.commandName === 'forceranksync') {
 
     // Get all ranks with thresholds
     const [ranks] = await db.query(
-      'SELECT id, min_hours FROM phpvms_ranks ORDER BY min_hours ASC'
+      'SELECT id, hours FROM ranks ORDER BY hours ASC'
     );
 
     // Get all active pilots
     const [pilots] = await db.query(
-      'SELECT id, pilot_id, rank_id, flight_time FROM phpvms_users WHERE state = 1'
+      'SELECT id, pilot_id, rank_id, flight_time FROM users WHERE state = 1'
     );
 
     let updatedCount = 0;
 
     for (const pilot of pilots) {
-      const hours = pilot.flight_time / 60; // minutes → hours
+      const hours = pilot.flight_time / 60; // convert minutes → hours
       let newRankId = pilot.rank_id;
 
       for (const rank of ranks) {
-        if (hours >= rank.min_hours) {
+        if (hours >= rank.hours) {
           newRankId = rank.id;
         }
       }
 
       if (newRankId !== pilot.rank_id) {
-        await db.query('UPDATE phpvms_users SET rank_id = ? WHERE id = ?', [newRankId, pilot.id]);
+        await db.query('UPDATE users SET rank_id = ? WHERE id = ?', [newRankId, pilot.id]);
         updatedCount++;
         console.log(`✅ Updated C${pilot.pilot_id} → rank_id ${newRankId}`);
       }
