@@ -228,12 +228,12 @@ if (interaction.commandName === 'forceranksync') {
   try {
     await interaction.deferReply();
 
-    // ✅ Only consider O-3 → O-6 ranks
+    // Pull the thresholds for O-3 → O-6
     const [ranks] = await db.query(
       'SELECT id, hours FROM ranks WHERE id IN (14, 15, 16, 17) ORDER BY hours ASC'
     );
 
-    // Pull all pilots (use WHERE state = 1 if you only want active ones)
+    // Get all pilots (active + inactive)
     const [pilots] = await db.query(
       'SELECT id, pilot_id, rank_id, flight_time FROM users'
     );
@@ -241,13 +241,20 @@ if (interaction.commandName === 'forceranksync') {
     let updatedCount = 0;
 
     for (const pilot of pilots) {
-      const hours = pilot.flight_time / 60; // ✅ convert minutes → hours
-      let newRankId = pilot.rank_id;
+      const hours = pilot.flight_time / 60; // minutes → hours
+      let newRankId = pilot.rank_id; // default = stay where they are
 
-      // Step through O-3 → O-6 thresholds
-      for (const rank of ranks) {
-        if (hours >= rank.hours) {
-          newRankId = rank.id;
+      if (hours >= 50) {
+        // Promote to the highest O-3 → O-6 rank they qualify for
+        for (const rank of ranks) {
+          if (hours >= rank.hours) {
+            newRankId = rank.id;
+          }
+        }
+      } else {
+        // Below 50 hrs → ensure they don't auto-demote below O-2
+        if (pilot.rank_id < 13) {
+          newRankId = 13; // bump up to O-2 if somehow lower
         }
       }
 
@@ -275,6 +282,7 @@ if (interaction.commandName === 'forceranksync') {
     });
   }
 }
+
 
 
 
