@@ -228,23 +228,23 @@ if (interaction.commandName === 'forceranksync') {
   try {
     await interaction.deferReply();
 
-    // ✅ Only pull O-3 → O-6 ranks
+    // ✅ Only consider O-3 → O-6 ranks
     const [ranks] = await db.query(
       'SELECT id, hours FROM ranks WHERE id IN (14, 15, 16, 17) ORDER BY hours ASC'
     );
 
-    // Get all active pilots
+    // Pull all pilots (use WHERE state = 1 if you only want active ones)
     const [pilots] = await db.query(
-      'SELECT id, pilot_id, rank_id, flight_time FROM users WHERE state = 1'
+      'SELECT id, pilot_id, rank_id, flight_time FROM users'
     );
 
     let updatedCount = 0;
 
     for (const pilot of pilots) {
-      const hours = pilot.flight_time / 60; // minutes → hours
+      const hours = pilot.flight_time / 60; // ✅ convert minutes → hours
       let newRankId = pilot.rank_id;
 
-      // Only consider O-3 → O-6
+      // Step through O-3 → O-6 thresholds
       for (const rank of ranks) {
         if (hours >= rank.hours) {
           newRankId = rank.id;
@@ -258,7 +258,7 @@ if (interaction.commandName === 'forceranksync') {
         ]);
         updatedCount++;
         console.log(
-          `✅ Updated C${pilot.pilot_id} to rank_id ${newRankId} (${hours.toFixed(
+          `✅ Updated C${pilot.pilot_id} → rank_id ${newRankId} (${hours.toFixed(
             1
           )} hrs)`
         );
