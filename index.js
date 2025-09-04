@@ -242,19 +242,25 @@ if (interaction.commandName === 'forceranksync') {
 
     for (const pilot of pilots) {
       const hours = pilot.flight_time / 60; // minutes → hours
-      let newRankId = pilot.rank_id; // default = stay where they are
+      let newRankId = pilot.rank_id;
 
-      if (hours >= 50) {
-        // Promote to the highest O-3 → O-6 rank they qualify for
+      // Only auto-update if pilot is at least O-2 (manual promotion done)
+      if (pilot.rank_id >= 13) {
+        let qualifiedRank = null;
+
+        // Step through O-3 → O-6 thresholds
         for (const rank of ranks) {
           if (hours >= rank.hours) {
-            newRankId = rank.id;
+            qualifiedRank = rank.id;
           }
         }
-      } else {
-        // Below 50 hrs → ensure they don't auto-demote below O-2
-        if (pilot.rank_id < 13) {
-          newRankId = 13; // bump up to O-2 if somehow lower
+
+        // Assign the highest qualified rank
+        if (qualifiedRank !== null) {
+          newRankId = qualifiedRank;
+        } else {
+          // If they don't meet 50 hrs yet, they should stay O-2
+          newRankId = 13;
         }
       }
 
@@ -282,6 +288,7 @@ if (interaction.commandName === 'forceranksync') {
     });
   }
 }
+
 
 
 
