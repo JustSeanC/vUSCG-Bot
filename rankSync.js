@@ -22,28 +22,35 @@ async function syncRanks(client, db, guildId) {
 
   for (const pilot of rows) {
   try {
-    const nicknamePrefix = `C${pilot.pilot_id}`;
-    const member = guild.members.cache.find(m =>
-      m.nickname && m.nickname.startsWith(nicknamePrefix)
-    );
-
-    if (!member) {
-      console.warn(`⚠️ Skipping pilot ${pilot.pilot_id} — no Discord member with nickname ${nicknamePrefix}`);
+    // Skip leadership / special accounts
+    if (pilot.pilot_id < 2000) {
+      console.log(`⏭️ Skipping leadership/special pilot C${pilot.pilot_id}`);
       continue;
     }
 
-    console.log(
-      `🔍 Sync check → Pilot C${pilot.pilot_id} | DB rank_id=${pilot.rank_id} | flight_time=${pilot.flight_time} mins (~${(pilot.flight_time/60).toFixed(1)} hrs)`
+    const expectedNickname = `C${pilot.pilot_id} `;
+    const member = guild.members.cache.find(m =>
+      m.nickname && m.nickname.startsWith(expectedNickname)
     );
 
-    let desiredRank = null;
-
-    // Force clamp for O-2
-    if (pilot.rank_id === 13) {
-      desiredRank = rankRoles[13];
-    } else if (pilot.rank_id >= 14 && pilot.rank_id <= 17) {
-      desiredRank = rankRoles[pilot.rank_id];
+    if (!member) {
+      console.warn(`⚠️ Skipping pilot ${pilot.pilot_id} — no Discord member with nickname "${expectedNickname}…"`);
+      continue;
     }
+
+    const hours = pilot.flight_time / 60;
+    console.log(
+      `🔍 Sync check → Pilot C${pilot.pilot_id} | DB rank_id=${pilot.rank_id} | flight_time=${pilot.flight_time} mins (~${hours.toFixed(1)} hrs)`
+    );
+
+    let effectiveRankId = pilot.rank_id;
+
+    // Clamp: if <50 hrs, force O-2
+    if (hours < 50) {
+      effectiveRankId = 13;
+    }
+
+    const desiredRank = rankRoles[effectiveRankId] || null;
 
     // Remove all O-2 → O-6 roles except the desired one
     const rolesToRemove = Object.values(rankRoles).filter(r => r !== desiredRank);
@@ -53,16 +60,17 @@ async function syncRanks(client, db, guildId) {
       }
     }
 
-    // Add the correct role
+    // Add the correct rank role
     if (desiredRank && !member.roles.cache.has(desiredRank)) {
       await member.roles.add(desiredRank).catch(() => {});
-      console.log(`✅ Synced ${member.user.tag} → rank_id ${pilot.rank_id}`);
+      console.log(`✅ Synced ${member.user.tag} → rank_id ${effectiveRankId}`);
     }
 
   } catch (err) {
     console.error(`❌ Error syncing pilot ${pilot.pilot_id}:`, err.message);
   }
 }
+
 
 
   console.log(`[⏰ Rank Sync] Completed at ${new Date().toLocaleTimeString()}`);
