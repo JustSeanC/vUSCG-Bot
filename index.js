@@ -170,40 +170,52 @@ setInterval(() => {
   syncRanks(client, db, process.env.GUILD_ID);
 }, 60 * 60 * 1000);
 
-  console.log(`[⏳] Backup scheduled in ${(initialDelay / 1000 / 60).toFixed(1)} minutes.`);
-
-  setTimeout(() => {
+    // --- BACKUP HANDLER ---
+  (async () => {
     const today = new Date().toISOString().split('T')[0];
     const lastBackup = fs.existsSync(BACKUP_TAG_FILE)
       ? fs.readFileSync(BACKUP_TAG_FILE, 'utf8').trim()
       : '';
 
-    if (lastBackup === today) {
-      console.log(`[⏭️] Skipping backup — already done today (${today})`);
-    } else {
-      runBackup(client);
+    if (lastBackup !== today) {
+      console.log(`[💾] Running missed backup now (${today})`);
+      await runBackup(client); // wait for Discord upload to finish
       fs.writeFileSync(BACKUP_TAG_FILE, today);
-      console.log(`[✅] Backup complete and tag updated.`);
     }
 
-    // Schedule repeating backups every 24 hours (with safety check)
-    setInterval(() => {
-      const newToday = new Date().toISOString().split('T')[0];
-      const last = fs.existsSync(BACKUP_TAG_FILE)
-        ? fs.readFileSync(BACKUP_TAG_FILE, 'utf8').trim()
-        : '';
+    // Schedule next run at 3 AM daily
+    const nowTime = new Date();
+    const targetTime = new Date();
+    targetTime.setHours(3, 0, 0, 0);
+    if (targetTime <= nowTime) targetTime.setDate(targetTime.getDate() + 1);
 
-      if (last === newToday) {
-        console.log(`[⏭️] Skipping daily backup — already done today (${newToday})`);
-        return;
-      }
+    const initialDelay = targetTime - nowTime;
+    console.log(`[⏳] Next scheduled backup in ${(initialDelay / 1000 / 60).toFixed(1)} minutes.`);
 
-      runBackup(client);
-      fs.writeFileSync(BACKUP_TAG_FILE, newToday);
-      console.log(`[✅] Daily backup complete and tag updated.`);
-    }, 24 * 60 * 60 * 1000);
-  }, initialDelay);
-});
+    setTimeout(() => {
+      const runDailyBackup = async () => {
+        const newToday = new Date().toISOString().split('T')[0];
+        const last = fs.existsSync(BACKUP_TAG_FILE)
+          ? fs.readFileSync(BACKUP_TAG_FILE, 'utf8').trim()
+          : '';
+
+        if (last === newToday) {
+          console.log(`[⏭️] Skipping daily backup — already done today (${newToday})`);
+          return;
+        }
+
+        await runBackup(client);
+        fs.writeFileSync(BACKUP_TAG_FILE, newToday);
+        console.log(`[✅] Daily backup complete and tag updated.`);
+      };
+
+      runDailyBackup(); // first scheduled run
+      setInterval(runDailyBackup, 24 * 60 * 60 * 1000); // repeat daily
+    }, initialDelay);
+  })(); // IIFE to allow top-level await
+}); // 👈 closes client.once('ready')
+
+
 
 
 
