@@ -281,7 +281,7 @@ if (interaction.commandName === 'forceranksync') {
 
       const member = await interaction.guild.members.fetch(targetUser.id);
       await member.setNickname(nickname);
-      await member.roles.add('1174513529253007370'); // vUSCG Cadet
+      await member.roles.add('1174513529253007370'); // vUSCG Ensign
       await member.roles.remove('1174513627273887895'); // Guest
 
       const trainingChannel = await interaction.guild.channels.fetch(trainingChannelId);
@@ -295,11 +295,11 @@ if (interaction.commandName === 'forceranksync') {
       });
 
       await thread.members.add(targetUser.id);
-      await thread.members.add(`251218149054087169`);
       await thread.members.add('347188501659254791');
       await thread.members.add('396783529327067136');
       await thread.members.add('365607493138907137');
       await thread.members.add('474043025287282688');
+      await thread.members.add('665580405419802657');
       
       await thread.send(`Welcome <@${targetUser.id}> - your account has been activated and you are ready to begin training. Please view <#${welcomeGuideChannelId}> for our ACARS information and just let us know here which training path you would like to follow first – Fixed Wing or Rotary Wing.`);
 
