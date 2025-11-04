@@ -300,6 +300,8 @@ if (interaction.commandName === 'forceranksync') {
       await thread.members.add('365607493138907137');
       await thread.members.add('474043025287282688');
       await thread.members.add('665580405419802657');
+      await thread.members.add('592518666546053141');
+      await thread.members.add('219487814809681921');
       
       await thread.send(`Welcome <@${targetUser.id}> - your account has been activated and you are ready to begin training. Please view <#${welcomeGuideChannelId}> for our ACARS information and just let us know here which training path you would like to follow first – Fixed Wing or Rotary Wing.`);
 
