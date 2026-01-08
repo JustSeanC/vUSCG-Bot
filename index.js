@@ -176,20 +176,35 @@ setInterval(() => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const adminRoleId = '1174513441256513606';
-  const staff = await interaction.guild.members.fetch(interaction.user.id);
+  // Block DMs (prevents interaction.guild being null)
+  if (!interaction.inGuild()) {
+    return interaction.reply({
+      content: '❌ This command can only be used inside the Discord server.',
+      ephemeral: true,
+    });
+  }
 
+  // Role IDs from .env
+  const COMMAND_STAFF_ROLE_ID = process.env.COMMAND_STAFF_ROLE_ID;
+  const INSTRUCTOR_PILOT_ROLE_ID = process.env.INSTRUCTOR_PILOT_ROLE_ID;
+
+  // Member who ran the command
+  const staff = interaction.member ?? await interaction.guild.members.fetch(interaction.user.id);
+
+  const hasRole = (roleId) => !!roleId && staff.roles.cache.has(roleId);
+
+  // Common options (safe to be null if command doesn't include them)
   const pilotId = interaction.options.getInteger('pilot_id');
   const targetUser = interaction.options.getUser('user');
 
 // ===== /forceranksync =====
 if (interaction.commandName === 'forceranksync') {
-  if (!staff.roles.cache.has(adminRoleId)) {
-    return interaction.reply({
-      content: '❌ You do not have permission to use this command.',
-      ephemeral: true
-    });
-  }
+  if (!hasRole(COMMAND_STAFF_ROLE_ID)) {
+  return interaction.reply({
+    content: '❌ You do not have permission to use this command.',
+    ephemeral: true
+  });
+}
 
   try {
     await interaction.deferReply();
@@ -261,6 +276,20 @@ if (interaction.commandName === 'forceranksync') {
 
   // ===== /activate =====
   if (interaction.commandName === 'activate') {
+      if (!hasRole(COMMAND_STAFF_ROLE_ID)) {
+    return interaction.reply({
+      content: '❌ You do not have permission to use this command.',
+      ephemeral: true,
+    });
+  }
+
+  if (!COMMAND_STAFF_ROLE_ID) {
+    return interaction.reply({
+      content: '❌ Bot misconfiguration: COMMAND_STAFF_ROLE_ID is missing in .env',
+      ephemeral: true,
+    });
+  }
+
     const trainingChannelId = '1174748570948223026';
     const welcomeGuideChannelId = '1350568038612865154';
 
@@ -321,9 +350,20 @@ if (interaction.commandName === 'forceranksync') {
 
   // ===== /promote =====
 if (interaction.commandName === 'promote') {
-  if (!staff.roles.cache.has(adminRoleId)) {
-    return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
-  }
+  if (!(hasRole(INSTRUCTOR_PILOT_ROLE_ID) || hasRole(COMMAND_STAFF_ROLE_ID))) {
+  return interaction.reply({
+    content: '❌ You do not have permission to use this command.',
+    ephemeral: true
+  });
+}
+
+if (!COMMAND_STAFF_ROLE_ID || !INSTRUCTOR_PILOT_ROLE_ID) {
+  return interaction.reply({
+    content: '❌ Bot misconfiguration: missing COMMAND_STAFF_ROLE_ID or INSTRUCTOR_PILOT_ROLE_ID in .env',
+    ephemeral: true
+  });
+}
+
 
   const track = interaction.options.getString('track');
   const rolePilot  = '1174513368992862218'; // vUSCG Pilot (permanent identity)

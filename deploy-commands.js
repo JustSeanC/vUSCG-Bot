@@ -67,7 +67,6 @@ new SlashCommandBuilder()
         { name: 'H60 (MH60)', value: 'H60' },
         { name: 'C27J', value: 'C27J' },
         { name: 'CN35', value: 'CN35' },
-        { name: 'C130', value: 'C130' },
         { name: 'C30J', value: 'C30J' }
       )
   )
