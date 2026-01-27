@@ -1,5 +1,18 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 
+function statusInfo(codeRaw) {
+  const code = (codeRaw || '').toUpperCase();
+
+  switch (code) {
+    case 'A': return { label: 'Active', emoji: '🟢', code: 'A' };
+    case 'M': return { label: 'Maintenance', emoji: '🛠️', code: 'M' };
+    case 'S': return { label: 'Stored', emoji: '📦', code: 'S' };
+    case 'R': return { label: 'Retired', emoji: '🪦', code: 'R' };
+    case 'C': return { label: 'Scrapped', emoji: '🗑️', code: 'C' };
+    default:  return { label: 'Unknown', emoji: '❔', code: code || '?' };
+  }
+}
+
 async function handlePagination(interaction, dataRows, title, formatRow) {
   const pageSize = 10;
   let page = 0;
@@ -83,31 +96,39 @@ module.exports = {
     try {
       await interaction.deferReply();
 
-      // 1) by registration
+      // 1) Registration lookup (exact match)
       const [regRows] = await db.query(
-        'SELECT airport_id, flight_time, icao FROM aircraft WHERE registration = ?',
+        `SELECT registration, airport_id, hub_id, status, flight_time, icao
+         FROM aircraft
+         WHERE registration = ?`,
         [input]
       );
 
       if (regRows.length > 0) {
-        const aircraft = regRows[0];
-        const hours = (aircraft.flight_time / 60).toFixed(1);
+        const ac = regRows[0];
+        const hours = ac.flight_time != null ? (ac.flight_time / 60).toFixed(1) : '0.0';
+        const s = statusInfo(ac.status);
 
         const embed = new EmbedBuilder()
-          .setTitle(`Aircraft Info: ${input}`)
+          .setTitle(`Aircraft: ${ac.registration}`)
           .addFields(
-            { name: 'Current Location', value: aircraft.airport_id || 'Unknown', inline: true },
-            { name: 'Aircraft Type', value: aircraft.icao || 'Unknown', inline: true },
-            { name: 'Total Flight Time', value: `${hours} hours`, inline: true }
+            { name: 'Type', value: ac.icao || 'Unknown', inline: true },
+            { name: 'Status', value: `${s.emoji} **${s.code}** — ${s.label}`, inline: true },
+            { name: 'Total Flight Time', value: `${hours} hours`, inline: true },
+            { name: 'Current Location', value: ac.airport_id || 'Unknown', inline: true },
+            { name: 'Home Location', value: ac.hub_id || 'Unknown', inline: true },
           )
           .setColor('Blue');
 
         return interaction.editReply({ embeds: [embed] });
       }
 
-      // 2) by type
+      // 2) Type lookup (icao)
       const [typeRows] = await db.query(
-        'SELECT registration, airport_id FROM aircraft WHERE icao = ?',
+        `SELECT registration, icao, status, airport_id, hub_id
+         FROM aircraft
+         WHERE icao = ?
+         ORDER BY registration ASC`,
         [input]
       );
 
@@ -116,25 +137,39 @@ module.exports = {
           interaction,
           typeRows,
           `Aircraft Type: ${input}`,
-          ac => `• **${ac.registration}** — ${ac.airport_id || 'Unknown'}`
+          ac => {
+            const s = statusInfo(ac.status);
+            const cur = ac.airport_id || 'UNK';
+            const home = ac.hub_id || 'UNK';
+            return `• **${ac.registration}** — ${s.emoji} ${s.code} | Cur: **${cur}** | Home: **${home}**`;
+          }
         );
       }
 
-      // 3) by airport
-      const [locationRows] = await db.query(
-        'SELECT registration, icao FROM aircraft WHERE airport_id = ?',
+      // 3) Airport lookup (current location airport_id)
+      const [airportRows] = await db.query(
+        `SELECT registration, icao, status, airport_id, hub_id
+         FROM aircraft
+         WHERE airport_id = ?
+         ORDER BY icao ASC, registration ASC`,
         [input]
       );
 
-      if (locationRows.length > 0) {
+      if (airportRows.length > 0) {
         return handlePagination(
           interaction,
-          locationRows,
-          `Aircraft at Airport: ${input}`,
-          ac => `• **${ac.registration}** — ${ac.icao || 'Unknown'}`
+          airportRows,
+          `Aircraft Currently at: ${input}`,
+          ac => {
+            const s = statusInfo(ac.status);
+            const home = ac.hub_id || 'UNK';
+            const type = ac.icao || 'UNK';
+            return `• **${ac.registration}** (${type}) — ${s.emoji} ${s.code} | Home: **${home}**`;
+          }
         );
       }
 
+      // 4) Nothing found
       await interaction.editReply({
         content: `❌ No aircraft found matching **${input}**.`,
       });
