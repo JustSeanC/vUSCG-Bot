@@ -2,13 +2,19 @@ const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('
 
 function statusSortWeight(codeRaw) {
   const code = (codeRaw || '').toUpperCase();
-  // R/C last
-  if (code === 'R' || code === 'C') return 2;
-  // A/M/S first
-  if (code === 'A' || code === 'M' || code === 'S') return 0;
-  // unknown in the middle
-  return 1;
+
+  // Desired order:
+  // A (Active) -> M (Maintenance) -> S (Stored) -> R/C (Retired/Scrapped) -> Unknown
+  switch (code) {
+    case 'A': return 0;
+    case 'M': return 1;
+    case 'S': return 2;
+    case 'R': return 3;
+    case 'C': return 3;
+    default:  return 4;
+  }
 }
+
 
 function statusInfo(codeRaw) {
   const code = (codeRaw || '').toUpperCase();
