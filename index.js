@@ -401,17 +401,17 @@ if (interaction.commandName === 'activate') {
       else fail++;
     }
 
-    // 7) Kickoff message (ping instructors if role exists)
-    const rolePing = INSTRUCTOR_PILOT_ROLE_ID ? `<@&${INSTRUCTOR_PILOT_ROLE_ID}> ` : '';
-    let kickoff =
-      `${rolePing}Welcome <@${targetUser.id}> — your account has been activated and you are ready to begin training.\n` +
-      `Please view <#${welcomeGuideChannelId}> for our ACARS information and let us know here which training path you would like to follow first — **Fixed Wing** or **Rotary Wing**.`;
+    // 7) Kickoff message (no role ping)
+let kickoff =
+  `Welcome <@${targetUser.id}> — your account has been activated and you are ready to begin training.\n` +
+  `Please view <#${welcomeGuideChannelId}> for our ACARS information and let us know here which training path you would like to follow first — **Fixed Wing** or **Rotary Wing**.`;
 
-    if (notes) {
-      kickoff += `\n\n**Activation notes:** ${notes}`;
-    }
+if (notes) {
+  kickoff += `\n\n**Activation notes:** ${notes}`;
+}
 
-    await thread.send(kickoff);
+await thread.send(kickoff);
+
 
     // 8) Staff-facing confirmation
     await interaction.editReply({
