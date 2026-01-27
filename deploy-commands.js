@@ -34,6 +34,19 @@ new SlashCommandBuilder()
       .setDescription('New current location ICAO (e.g., KPIE)')
       .setRequired(true))
   .addStringOption(option =>
+     option.setName('status')
+    .setDescription('Optional new aircraft status')
+    .setRequired(false)
+    .addChoices(
+      { name: 'Active (A)', value: 'A' },
+      { name: 'Maintenance (M)', value: 'M' },
+      { name: 'Stored (S)', value: 'S' },
+      { name: 'Retired (R)', value: 'R' },
+      { name: 'Scrapped (C)', value: 'C' },
+    )
+)
+
+  .addStringOption(option =>
     option.setName('reason')
       .setDescription('Reason for move (optional)')
       .setRequired(false))

@@ -24,15 +24,20 @@ module.exports = {
 
     const registration = interaction.options.getString('registration', true).trim().toUpperCase();
     const newLocation = interaction.options.getString('airport', true).trim().toUpperCase();
+
     const reasonRaw = interaction.options.getString('reason');
     const reason = reasonRaw && reasonRaw.trim().length ? reasonRaw.trim() : 'No reason provided';
+
+    // Optional status
+    const newStatusRaw = interaction.options.getString('status');
+    const newStatus = newStatusRaw ? newStatusRaw.trim().toUpperCase() : null;
 
     await interaction.deferReply({ ephemeral: true });
 
     try {
-      // 1) Find aircraft + current location
+      // 1) Find aircraft + current location + current status
       const [acRows] = await db.query(
-        'SELECT airport_id FROM aircraft WHERE registration = ? LIMIT 1',
+        'SELECT airport_id, status FROM aircraft WHERE registration = ? LIMIT 1',
         [registration]
       );
 
@@ -43,6 +48,7 @@ module.exports = {
       }
 
       const currentLocation = (acRows[0].airport_id || 'UNKNOWN').toUpperCase();
+      const currentStatus = (acRows[0].status || 'UNKNOWN').toUpperCase();
 
       // 2) Validate destination airport exists
       const [aptRows] = await db.query(
@@ -56,13 +62,20 @@ module.exports = {
         });
       }
 
-      // 3) Update aircraft location
-      await db.query(
-        'UPDATE aircraft SET airport_id = ? WHERE registration = ?',
-        [newLocation, registration]
-      );
+      // 3) Update aircraft location (+ status if provided)
+      if (newStatus) {
+        await db.query(
+          'UPDATE aircraft SET airport_id = ?, status = ? WHERE registration = ?',
+          [newLocation, newStatus, registration]
+        );
+      } else {
+        await db.query(
+          'UPDATE aircraft SET airport_id = ? WHERE registration = ?',
+          [newLocation, registration]
+        );
+      }
 
-      // 4) Log to ferry list channel
+      // 4) Log to ferry list channel (location move only; no need to mention status)
       try {
         const ch = await client.channels.fetch(ferryChannelId);
         if (ch && ch.isTextBased()) {
@@ -74,9 +87,15 @@ module.exports = {
         console.warn('⚠️ Could not post to ferry list channel:', e?.message ?? e);
       }
 
-      // 5) Staff confirmation
+      // 5) Staff confirmation (include status change if used)
+      const statusText = newStatus
+        ? `\n✅ Status: **${currentStatus}** → **${newStatus}**`
+        : '';
+
       await interaction.editReply({
-        content: `✅ Updated **${registration}**: **${currentLocation}** → **${newLocation}** (Reason: ${reason})`,
+        content:
+          `✅ Updated **${registration}**: **${currentLocation}** → **${newLocation}**` +
+          `${statusText}\n📝 Reason: ${reason}`,
       });
 
     } catch (err) {
