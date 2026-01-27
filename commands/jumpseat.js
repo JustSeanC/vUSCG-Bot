@@ -13,20 +13,39 @@ module.exports = {
       interaction.user?.username ||
       '';
 
-    // Extract pilot ID from something like "C3015 ..."
-    const m = displayName.match(/\bC(\d{3,6})\b/i);
-    if (!m) {
-  return interaction.reply({
-    content:
-      `❌ I couldn't find your Pilot ID in your server nickname.\n` +
-      `I looked at: **${displayName || '(blank)'}**\n\n` +
-      `Your nickname needs to include something like **C3015**.\n` +
-      `Ask Command Staff for assistance, then try again.`,
-    ephemeral: true,
-  });
-}
+    // ✅ NEW: Try to resolve pilotId from discord_links first (more reliable)
+    let pilotId = null;
+    try {
+      const discordId = interaction.user.id;
 
-    const pilotId = parseInt(m[1], 10);
+      const [linkRows] = await db.query(
+        'SELECT pilot_id FROM discord_links WHERE discord_id = ? LIMIT 1',
+        [discordId]
+      );
+
+      if (linkRows.length > 0 && linkRows[0].pilot_id != null) {
+        pilotId = parseInt(linkRows[0].pilot_id, 10);
+      }
+    } catch (e) {
+      console.warn('⚠️ discord_links lookup failed, falling back to nickname parse:', e?.message ?? e);
+    }
+
+    // Fallback: Extract pilot ID from something like "C3015 ..."
+    if (!pilotId) {
+      const m = displayName.match(/\bC(\d{3,6})\b/i);
+      if (!m) {
+        return interaction.reply({
+          content:
+            `❌ I couldn't find your Pilot ID in your server nickname.\n` +
+            `I looked at: **${displayName || '(blank)'}**\n\n` +
+            `Your nickname needs to include something like **C3015**.\n` +
+            `Ask Command Staff for assistance, then try again.`,
+          ephemeral: true,
+        });
+      }
+
+      pilotId = parseInt(m[1], 10);
+    }
 
     await interaction.deferReply({ ephemeral: true });
 
@@ -51,7 +70,7 @@ module.exports = {
 
       if (userRows.length === 0) {
         return interaction.editReply({
-          content: `❌ I found **C${pilotId}** in your nickname, but that Pilot ID does not exist in phpVMS.`,
+          content: `❌ I resolved Pilot **C${pilotId}**, but that Pilot ID does not exist in phpVMS.`,
         });
       }
 

@@ -87,6 +87,13 @@ await interaction.deferReply({ ephemeral: true });
           content: `❌ Could not find training channel (${trainingChannelId}).`,
         });
       }
+      
+await db.query(
+  `INSERT INTO discord_links (discord_id, pilot_id)
+   VALUES (?, ?)
+   ON DUPLICATE KEY UPDATE pilot_id = VALUES(pilot_id), linked_at = CURRENT_TIMESTAMP`,
+  [targetUser.id, pilotId]
+);
 
       const thread = await trainingChannel.threads.create({
         name: `Training Case for C${pilotId}`,
