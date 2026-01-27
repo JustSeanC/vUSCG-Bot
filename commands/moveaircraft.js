@@ -5,20 +5,20 @@ module.exports = {
     const { interaction, db, hasRole, roles, client } = ctx;
 
     // Misconfig check
-    if (!roles.COMMAND_STAFF_ROLE_ID) {
-      return interaction.reply({
-        content: '❌ Bot misconfiguration: COMMAND_STAFF_ROLE_ID is missing in .env',
-        ephemeral: true,
-      });
-    }
+if (!roles.COMMAND_STAFF_ROLE_ID || !roles.INSTRUCTOR_PILOT_ROLE_ID) {
+  return interaction.reply({
+    content: '❌ Bot misconfiguration: COMMAND_STAFF_ROLE_ID or INSTRUCTOR_PILOT_ROLE_ID is missing in .env',
+    ephemeral: true,
+  });
+}
 
-    // Permission check
-    if (!hasRole(roles.COMMAND_STAFF_ROLE_ID)) {
-      return interaction.reply({
-        content: '❌ You do not have permission to use this command.',
-        ephemeral: true,
-      });
-    }
+// Permission check (Command Staff OR Instructor Pilot)
+if (!(hasRole(roles.COMMAND_STAFF_ROLE_ID) || hasRole(roles.INSTRUCTOR_PILOT_ROLE_ID))) {
+  return interaction.reply({
+    content: '❌ You do not have permission to use this command.',
+    ephemeral: true,
+  });
+}
 
     const ferryChannelId = '1397078967244161224';
 
