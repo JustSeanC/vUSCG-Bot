@@ -3,19 +3,25 @@ require('dotenv').config();
 
 const commands = [
   new SlashCommandBuilder()
-    .setName('activate')
-    .setDescription('Activate a user by pilot ID and assign roles')
-    .addIntegerOption(option =>
-      option.setName('pilot_id')
-        .setDescription('Pilot ID (e.g., 1234)')
-        .setRequired(true)
-    )
-    .addUserOption(option =>
-      option.setName('user')
-        .setDescription('Discord user to activate')
-        .setRequired(true)
-    )
-    .toJSON(),
+  .setName('activate')
+  .setDescription('Activate a user and open a training thread')
+  .addIntegerOption(option =>
+    option.setName('pilot_id')
+      .setDescription('Pilot ID (e.g., 1234)')
+      .setRequired(true)
+  )
+  .addUserOption(option =>
+    option.setName('user')
+      .setDescription('Discord user to activate')
+      .setRequired(true)
+  )
+  .addStringOption(option =>
+    option.setName('notes')
+      .setDescription('Optional notes (e.g., "Needs Stage 0, hours show 55")')
+      .setRequired(false)
+  )
+  .toJSON(),
+
 
   new SlashCommandBuilder()
     .setName('promote')
@@ -92,17 +98,7 @@ new SlashCommandBuilder()
     .setDescription('Get aircraft info by Registration, Type, or Airport ID')
     .addStringOption(option =>
       option.setName('search')
-        .setDescription('Enter Registration (N1234), Type (C208), or Airport ID (KJFK)')
-        .setRequired(true)
-    )
-    .toJSON(),
-
-  new SlashCommandBuilder()
-    .setName('atc')
-    .setDescription('Check online ATC at a given airport (VATSIM)')
-    .addStringOption(option =>
-      option.setName('airport')
-        .setDescription('Enter ICAO code (e.g., KATL, KLAX)')
+        .setDescription('Enter Registration (C6532), Type (C30J), or Airport ID (KFMH)')
         .setRequired(true)
     )
     .toJSON(),

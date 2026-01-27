@@ -275,14 +275,9 @@ if (interaction.commandName === 'forceranksync') {
 
 
   // ===== /activate =====
-  if (interaction.commandName === 'activate') {
-      if (!hasRole(COMMAND_STAFF_ROLE_ID)) {
-    return interaction.reply({
-      content: '❌ You do not have permission to use this command.',
-      ephemeral: true,
-    });
-  }
+if (interaction.commandName === 'activate') {
 
+  // 0) Misconfig check first (before hasRole)
   if (!COMMAND_STAFF_ROLE_ID) {
     return interaction.reply({
       content: '❌ Bot misconfiguration: COMMAND_STAFF_ROLE_ID is missing in .env',
@@ -290,63 +285,153 @@ if (interaction.commandName === 'forceranksync') {
     });
   }
 
-    const trainingChannelId = '1174748570948223026';
-    const welcomeGuideChannelId = '1350568038612865154';
+  // Permission check
+  if (!hasRole(COMMAND_STAFF_ROLE_ID)) {
+    return interaction.reply({
+      content: '❌ You do not have permission to use this command.',
+      ephemeral: true,
+    });
+  }
 
+  // Pull options (do this inside the handler so it’s self-contained)
+  const pilotId = interaction.options.getInteger('pilot_id');
+  const targetUser = interaction.options.getUser('user');
+  const notesRaw = interaction.options.getString('notes'); // optional (only works if you added this option in deploy-commands.js)
+  const notes = notesRaw ? notesRaw.trim() : null;
+
+  const trainingChannelId = '1174748570948223026';
+  const welcomeGuideChannelId = '1350568038612865154';
+
+  // Helper: never let an add failure crash the command
+  const safeAddToThread = async (thread, userId) => {
     try {
-      const [rows] = await db.query('SELECT name FROM users WHERE pilot_id = ?', [pilotId]);
-      if (rows.length === 0) {
-        return interaction.reply({ content: `❌ No user found with Pilot ID ${pilotId}`, ephemeral: true });
-      }
+      await thread.members.add(userId);
+      return true;
+    } catch (e) {
+      console.warn(`⚠️ Could not add ${userId} to thread ${thread.id}:`, e?.message ?? e);
+      return false;
+    }
+  };
 
-      const fullName = rows[0].name.trim();
-      const [firstName, ...lastParts] = fullName.split(' ');
-      const lastInitial = lastParts.length ? lastParts[0][0].toUpperCase() : '';
-      const nickname = `C${pilotId} ${firstName} ${lastInitial}`;
+  await interaction.deferReply({ ephemeral: true });
 
-      await interaction.deferReply();
-
-      await db.query('UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?', [1, 12, pilotId]);
-
-      const member = await interaction.guild.members.fetch(targetUser.id);
-      await member.setNickname(nickname);
-      await member.roles.add('1174513529253007370'); // vUSCG Ensign
-      await member.roles.remove('1174513627273887895'); // Guest
-
-      const trainingChannel = await interaction.guild.channels.fetch(trainingChannelId);
-
-      const thread = await trainingChannel.threads.create({
-        name: `Training Case for C${pilotId}`,
-        autoArchiveDuration: 1440,
-        type: 12,
-        reason: `Training onboarding for C${pilotId}`,
-        invitable: true,
+  try {
+    // 1) Validate pilot exists in phpVMS
+    const [rows] = await db.query('SELECT name FROM users WHERE pilot_id = ?', [pilotId]);
+    if (rows.length === 0) {
+      return interaction.editReply({
+        content: `❌ No user found with Pilot ID ${pilotId}`,
       });
+    }
 
-      await thread.members.add(targetUser.id);
-      await thread.members.add('347188501659254791');
-      await thread.members.add('396783529327067136');
-      await thread.members.add('365607493138907137');
-      await thread.members.add('474043025287282688');
-      await thread.members.add('665580405419802657');
-      await thread.members.add('592518666546053141');
-      await thread.members.add('219487814809681921');
-      
-      await thread.send(`Welcome <@${targetUser.id}> - your account has been activated and you are ready to begin training. Please view <#${welcomeGuideChannelId}> for our ACARS information and just let us know here which training path you would like to follow first – Fixed Wing or Rotary Wing.`);
+    const fullName = rows[0].name.trim();
+    const [firstName, ...lastParts] = fullName.split(' ');
+    const lastInitial = lastParts.length ? lastParts[0][0].toUpperCase() : '';
+    const nickname = `C${pilotId} ${firstName} ${lastInitial}`;
 
-      await interaction.editReply({
-        content: `✅ Activated <@${targetUser.id}> as **${nickname}** (Pilot ID ${pilotId}). A private training thread has been created.`,
+    // 2) Update database (activate + set rank)
+    await db.query('UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?', [1, 12, pilotId]);
+
+    // 3) Fetch Discord member
+    let member;
+    try {
+      member = await interaction.guild.members.fetch(targetUser.id);
+    } catch {
+      return interaction.editReply({
+        content: `❌ Could not find that Discord user in this server. Make sure they have joined first.`,
       });
+    }
 
-    } catch (err) {
-      console.error('❌ Error in activate command:', err);
+    // 4) Nickname + roles (best-effort)
+    try { await member.setNickname(nickname); }
+    catch (e) { console.warn('⚠️ Nickname set failed:', e?.message ?? e); }
+
+    try { await member.roles.add('1174513529253007370'); } // vUSCG Cadet
+    catch (e) { console.warn('⚠️ Adding Cadet role failed:', e?.message ?? e); }
+
+    try { await member.roles.remove('1174513627273887895'); } // Guest
+    catch (e) { console.warn('⚠️ Removing Guest role failed:', e?.message ?? e); }
+
+    // 5) Create private training thread
+    const trainingChannel = await interaction.guild.channels.fetch(trainingChannelId);
+    if (!trainingChannel) {
+      return interaction.editReply({
+        content: `❌ Could not find training channel (${trainingChannelId}).`,
+      });
+    }
+
+    const thread = await trainingChannel.threads.create({
+      name: `Training Case for C${pilotId}`,
+      autoArchiveDuration: 1440,
+      type: 12, // PrivateThread
+      reason: `Training onboarding for C${pilotId}`,
+      invitable: true,
+    });
+
+    // 6) Add: target user, command runner, and ALL instructor pilots from role
+    const toAdd = new Set();
+    toAdd.add(targetUser.id);
+    toAdd.add(interaction.user.id);
+
+    let instructorCount = 0;
+
+    if (INSTRUCTOR_PILOT_ROLE_ID) {
       try {
-        await interaction.editReply({ content: '❌ An error occurred during activation.' });
-      } catch {
-        console.warn('⚠️ Interaction expired before bot could reply.');
+        // Ensure role.members is populated
+        await interaction.guild.members.fetch({ withPresences: false });
+
+        const role = await interaction.guild.roles.fetch(INSTRUCTOR_PILOT_ROLE_ID);
+        if (role) {
+          instructorCount = role.members.size;
+          for (const [id] of role.members) {
+            toAdd.add(id);
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ Could not fetch/invite instructor role members:', e?.message ?? e);
       }
+    } else {
+      console.warn('⚠️ INSTRUCTOR_PILOT_ROLE_ID is missing in .env; no instructors will be auto-added.');
+    }
+
+    let ok = 0, fail = 0;
+    for (const id of toAdd) {
+      const added = await safeAddToThread(thread, id);
+      if (added) ok++;
+      else fail++;
+    }
+
+    // 7) Kickoff message (ping instructors if role exists)
+    const rolePing = INSTRUCTOR_PILOT_ROLE_ID ? `<@&${INSTRUCTOR_PILOT_ROLE_ID}> ` : '';
+    let kickoff =
+      `${rolePing}Welcome <@${targetUser.id}> — your account has been activated and you are ready to begin training.\n` +
+      `Please view <#${welcomeGuideChannelId}> for our ACARS information and let us know here which training path you would like to follow first — **Fixed Wing** or **Rotary Wing**.`;
+
+    if (notes) {
+      kickoff += `\n\n**Activation notes:** ${notes}`;
+    }
+
+    await thread.send(kickoff);
+
+    // 8) Staff-facing confirmation
+    await interaction.editReply({
+      content:
+        `✅ Activated <@${targetUser.id}> as **${nickname}** (Pilot ID ${pilotId}).\n` +
+        `✅ Private training thread created: **${thread.name}**\n` +
+        (INSTRUCTOR_PILOT_ROLE_ID ? `👥 Auto-invited Instructor Pilots: ${instructorCount}\n` : '') +
+        `➕ Thread adds: ${ok} succeeded, ${fail} failed (non-fatal).`,
+    });
+
+  } catch (err) {
+    console.error('❌ Error in activate command:', err);
+    try {
+      await interaction.editReply({ content: '❌ An error occurred during activation.' });
+    } catch {
+      console.warn('⚠️ Interaction expired before bot could reply.');
     }
   }
+}
+
 
   // ===== /promote =====
 if (interaction.commandName === 'promote') {
@@ -748,90 +833,6 @@ mapUrl = `https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/` +
     await interaction.editReply({ content: '❌ An error occurred while generating the mission.' });
   }
 }
-
-  // ===== /atc =====
-  /* if (interaction.commandName === 'atc') {
-    const userInput = interaction.options.getString('airport').toUpperCase();
-    await interaction.deferReply();
-
-    const icao = userInput.startsWith('K') ? userInput : `K${userInput}`;
-    const faa = icao.slice(1);
-
-    const artccCoverage = {
-      'KLAS': ['LAX_', 'ZLA'],
-      'KLAX': ['LAX_', 'ZLA'],
-      'KACY': ['NY_', 'ZNY'],
-      'KATL': ['ATL_', 'ZTL'],
-      'KPHX': ['PHX_', 'ZAB'],
-      'KSAN': ['LAX_', 'ZLA'],
-      'KSEA': ['SEA_', 'ZSE'],
-      'KJFK': ['NY_', 'ZNY'],
-      'KDFW': ['DFW_', 'ZFW'],
-      'KDEN': ['DEN_', 'ZDV'],
-      'KORD': ['CHI_', 'ZAU'],
-      'KMIA': ['MIA_', 'ZMA'],
-      'KSVN': ['SAV_', 'ZJX'],
-      // ... include your full list here
-    };
-
-    const baseTerms = [icao, faa];
-    const regionalTerms = artccCoverage[icao] || [];
-    const searchTerms = [...baseTerms, ...regionalTerms.map(t => t.toUpperCase())];
-
-    try {
-      const response = await fetch('https://data.vatsim.net/v3/vatsim-data.json');
-      const data = await response.json();
-
-      const categories = {
-        delivery: [],
-        ground: [],
-        tower: [],
-        approach: [],
-        center: [],
-        other: [],
-      };
-
-      data.controllers.forEach(ctrl => {
-        const cs = ctrl.callsign.toUpperCase();
-        const matches = searchTerms.some(code => cs.includes(code));
-        if (!matches || !ctrl.frequency) return;
-
-        if (cs.includes('DEL')) categories.delivery.push(ctrl);
-        else if (cs.includes('GND')) categories.ground.push(ctrl);
-        else if (cs.includes('TWR')) categories.tower.push(ctrl);
-        else if (cs.includes('APP') || cs.includes('DEP')) categories.approach.push(ctrl);
-        else if (cs.includes('CTR')) categories.center.push(ctrl);
-        else categories.other.push(ctrl);
-      });
-
-      const format = (title, list) => {
-        if (!list.length) return null;
-        return `**${title}**\n${list.map(c => `• **${c.callsign}** – ${c.frequency}`).join('\n')}`;
-      };
-
-      const output = [
-        format('📝 Delivery', categories.delivery),
-        format('🚜 Ground', categories.ground),
-        format('🗼 Tower', categories.tower),
-        format('🛫 Approach / Departure', categories.approach),
-        format('📡 Center / ARTCC', categories.center),
-        format('📻 Other', categories.other),
-      ].filter(Boolean).join('\n\n');
-
-      if (!output) {
-        return await interaction.editReply(`🛬 No ATC currently online for **${icao}**.`);
-      }
-
-      await interaction.editReply({
-        content: `🎧 **Active ATC near ${icao}**\n\n${output}`,
-      });
-
-    } catch (err) {
-      console.error('❌ Error fetching VATSIM data:', err);
-      await interaction.editReply('❌ Could not fetch ATC info at this time.');
-    }
-  } */
-
 
 
 });
