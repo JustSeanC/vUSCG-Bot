@@ -22,7 +22,22 @@ const commands = [
   )
   .toJSON(),
 
-
+new SlashCommandBuilder()
+  .setName('moveaircraft')
+  .setDescription('Move an aircraft to a new current location (command staff only)')
+  .addStringOption(option =>
+    option.setName('registration')
+      .setDescription('Aircraft registration (e.g., C6052)')
+      .setRequired(true))
+  .addStringOption(option =>
+    option.setName('airport')
+      .setDescription('New current location ICAO (e.g., KPIE)')
+      .setRequired(true))
+  .addStringOption(option =>
+    option.setName('reason')
+      .setDescription('Reason for move (optional)')
+      .setRequired(false))
+  .toJSON(),
   new SlashCommandBuilder()
     .setName('promote')
     .setDescription('Promote a user to vUSCG Pilot and assign a track')

@@ -4,4 +4,5 @@ module.exports = {
   promote: require('./promote'),
   location: require('./location'),
   mission: require('./mission'),
+  moveaircraft: require('./moveaircraft'),
 };
