@@ -194,24 +194,32 @@ if (typeof distanceOverride === 'number') {
   }
 }
 
-      // 4) Insert PIREP
-      const pirepId = randomUUID();
-      await db.query(
-        `INSERT INTO pireps (
-  id, user_id, airline_id, aircraft_id,
-  dpt_airport_id, arr_airport_id,
-  flight_time, distance,
-  route, notes,
-  status, state, source_name,
-  submitted_at, created_at, updated_at
-) VALUES (
-  ?, ?, ?, ?,
-  ?, ?,
-  ?, ?,
-  ?, ?,
-  ?, ?, ?,
-  NOW(), NOW(), NOW()
-)`,
+// 4) Insert PIREP
+const pirepId = randomUUID();
+await db.query(
+  `INSERT INTO pireps (
+    id, user_id, airline_id, aircraft_id,
+    dpt_airport_id, arr_airport_id,
+    flight_time, distance,
+    route, notes,
+    status, state, source_name,
+    submitted_at, created_at, updated_at
+  ) VALUES (
+    ?, ?, ?, ?,
+    ?, ?,
+    ?, ?,
+    ?, ?,
+    ?, ?, ?,
+    UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP()
+  )`,
+  [
+    pirepId, userId, airlineId, aircraftId,
+    dep, arr,
+    minutes, dist,
+    route, notes,
+    'ARR', pirepState, 'Discord Manual',
+  ]
+);
 
         [
   pirepId, userId, airlineId, aircraftId,
@@ -221,7 +229,6 @@ if (typeof distanceOverride === 'number') {
   'ARR', pirepState, 'Discord Manual',
 ]
 
-      );
 
       // 5) Optional relocation (pilot + aircraft)
       let relocatedUser = false;
