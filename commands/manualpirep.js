@@ -48,6 +48,12 @@ function parseTimeToMinutes(inputRaw) {
 
   return null; // invalid
 }
+function formatMinutesHHMM(totalMinutes) {
+  const m = Math.max(0, parseInt(totalMinutes, 10) || 0);
+  const h = Math.floor(m / 60);
+  const mm = String(m % 60).padStart(2, '0');
+  return `${String(h).padStart(2, '0')}:${mm}`;
+}
 
 module.exports = {
   name: 'manualpirep',
@@ -248,20 +254,20 @@ try {
     const approvalText = pirepState === 2 ? '✅ Auto-approved (Pilot)' : '🕓 Pending approval (Trainee)';
 
     // Build a readable log message
-    let msg =
-      `✈️ **Manual PIREP Filed**\n` +
-      `• Pilot: <@${interaction.user.id}> (C${pilotId})\n` +
-      `• Aircraft: **${registration}** (Status: **${acStatus}**)\n` +
-      `• Route: **${dep} → ${arr}**\n` +
-      `• Time: **${minutes} min**` +
-      (dist != null ? ` | Distance: **${dist} NM**\n` : `\n`) +
-      `• Approval: **${approvalText}**\n` +
-      `• PIREP ID: \`${pirepId}\``;
+let msg =
+  `✈️ **Manual PIREP Filed**\n` +
+  `• Pilot: <@${interaction.user.id}> (C${pilotId})\n` +
+  `• Aircraft: **${registration}** (Status: **${acStatus}**)\n` +
+  `• Route: **${dep} → ${arr}**\n` +
+  `• Time: **${formatMinutesHHMM(minutes)}**` +
+  (dist != null ? ` | Distance: **${dist} NM**\n` : `\n`) +
+  `• Approval: **${approvalText}**`;
 
-    if (route) msg += `\n• Route String: \`${route}\``;
-    if (notes) msg += `\n• Notes: ${notes}`;
+if (route) msg += `\n• Route String: \`${route}\``;
+if (notes) msg += `\n• Notes: ${notes}`;
 
-    await ch.send(msg);
+await ch.send(msg);
+
   } else {
     console.warn(`⚠️ Log channel ${logChannelId} not found or not text-based`);
   }
@@ -273,7 +279,7 @@ try {
       await interaction.editReply({
         content:
           `✅ Manual PIREP created for **C${pilotId}** (${pirepId}).\n` +
-          `• Approval: **${pirepState === 2 ? 'Auto-approved (Pilot)' : 'Pending approval (Trainee)'}**\n`
+          `• Approval: **${pirepState === 2 ? 'Auto-approved (Pilot)' : 'Pending approval (Trainee)'}**\n`+
           `• Aircraft: **${registration}** (Status: **${acStatus}**)\n` +
           `• Route: **${dep} → ${arr}**\n` +
           `• Time: **${minutes} min**` +
