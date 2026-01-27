@@ -34,6 +34,10 @@ new SlashCommandBuilder()
       .setDescription('New current location ICAO (e.g., KPIE)')
       .setRequired(true))
   .addStringOption(option =>
+    option.setName('reason')
+      .setDescription('Reason for move (optional)')
+      .setRequired(true))
+  .addStringOption(option =>
      option.setName('status')
     .setDescription('Optional new aircraft status')
     .setRequired(false)
@@ -46,10 +50,7 @@ new SlashCommandBuilder()
     )
 )
 
-  .addStringOption(option =>
-    option.setName('reason')
-      .setDescription('Reason for move (optional)')
-      .setRequired(false))
+  
   .toJSON(),
   new SlashCommandBuilder()
     .setName('promote')
