@@ -5,4 +5,5 @@ module.exports = {
   location: require('./location'),
   mission: require('./mission'),
   moveaircraft: require('./moveaircraft'),
+  jumpseat: require('./jumpseat'),
 };

@@ -120,7 +120,15 @@ new SlashCommandBuilder()
       )
   )
   .toJSON(),
-
+new SlashCommandBuilder()
+  .setName('jumpseat')
+  .setDescription('Jumpseat yourself to another airport (updates your current location)')
+  .addStringOption(option =>
+    option.setName('airport')
+      .setDescription('Destination ICAO (must exist in phpVMS airports table)')
+      .setRequired(true)
+  )
+  .toJSON(),
   new SlashCommandBuilder()
     .setName('location')
     .setDescription('Get aircraft info by Registration, Type, or Airport ID')
