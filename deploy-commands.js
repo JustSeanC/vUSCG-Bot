@@ -74,6 +74,8 @@ new SlashCommandBuilder()
         )
     )
     .toJSON(),
+
+// Mission generator command
 new SlashCommandBuilder()
   .setName('mission')
   .setDescription('Generate a mission based on type, aircraft, and optional base')
@@ -121,6 +123,7 @@ new SlashCommandBuilder()
   )
   .toJSON(),
 
+// Jumpseat command
 new SlashCommandBuilder()
   .setName('jumpseat')
   .setDescription('Jumpseat yourself to another airport (updates your current location)')
@@ -130,6 +133,19 @@ new SlashCommandBuilder()
       .setRequired(true)
   )
   .toJSON(),
+// Manual PIREP command
+  new SlashCommandBuilder()
+  .setName('manualpirep')
+  .setDescription('Create a manual PIREP for yourself (uses your linked Pilot ID / nickname)')
+  .addStringOption(o => o.setName('registration').setDescription('Aircraft registration (e.g., C6052)').setRequired(true))
+  .addStringOption(o => o.setName('dep').setDescription('Departure ICAO').setRequired(true))
+  .addStringOption(o => o.setName('arr').setDescription('Arrival ICAO').setRequired(true))
+  .addIntegerOption(o => o.setName('minutes').setDescription('Flight time in minutes').setRequired(true))
+  .addStringOption(o => o.setName('route').setDescription('Optional route string (free text)').setRequired(false))
+  .addStringOption(o => o.setName('notes').setDescription('Optional notes').setRequired(false))
+  .addBooleanOption(o => o.setName('relocate').setDescription('Move pilot + aircraft to ARR after filing? (default true)').setRequired(false))
+  .toJSON(),
+
   new SlashCommandBuilder()
     .setName('location')
     .setDescription('Get aircraft info by Registration, Type, or Airport ID')
