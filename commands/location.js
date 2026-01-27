@@ -1,5 +1,15 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 
+function statusSortWeight(codeRaw) {
+  const code = (codeRaw || '').toUpperCase();
+  // R/C last
+  if (code === 'R' || code === 'C') return 2;
+  // A/M/S first
+  if (code === 'A' || code === 'M' || code === 'S') return 0;
+  // unknown in the middle
+  return 1;
+}
+
 function statusInfo(codeRaw) {
   const code = (codeRaw || '').toUpperCase();
 
@@ -133,18 +143,37 @@ module.exports = {
       );
 
       if (typeRows.length > 0) {
-        return handlePagination(
-          interaction,
-          typeRows,
-          `Aircraft Type: ${input}`,
-          ac => {
-            const s = statusInfo(ac.status);
-            const cur = ac.airport_id || 'UNK';
-            const home = ac.hub_id || 'UNK';
-            return `• **${ac.registration}** — ${s.emoji} ${s.code} | Cur: **${cur}** | Home: **${home}**`;
-          }
-        );
+  // Sort: A/M/S first, Unknown mid, R/C last
+  typeRows.sort((a, b) => {
+    const wa = statusSortWeight(a.status);
+    const wb = statusSortWeight(b.status);
+    if (wa !== wb) return wa - wb;
+    // tie-breakers
+    const ia = (a.icao || '').localeCompare(b.icao || '');
+    if (ia !== 0) return ia;
+    return (a.registration || '').localeCompare(b.registration || '');
+  });
+
+  return handlePagination(
+    interaction,
+    typeRows,
+    `Aircraft Type: ${input}`,
+    ac => {
+      const s = statusInfo(ac.status);
+      const cur = ac.airport_id || 'UNK';
+      const code = (ac.status || '').toUpperCase();
+
+      // For R/C omit home
+      if (code === 'R' || code === 'C') {
+        return `• **${ac.registration}** — ${s.emoji} ${s.code} | Cur: **${cur}**`;
       }
+
+      const home = ac.hub_id || 'UNK';
+      return `• **${ac.registration}** — ${s.emoji} ${s.code} | Cur: **${cur}** | Home: **${home}**`;
+    }
+  );
+}
+
 
       // 3) Airport lookup (current location airport_id)
       const [airportRows] = await db.query(
@@ -156,18 +185,37 @@ module.exports = {
       );
 
       if (airportRows.length > 0) {
-        return handlePagination(
-          interaction,
-          airportRows,
-          `Aircraft Currently at: ${input}`,
-          ac => {
-            const s = statusInfo(ac.status);
-            const home = ac.hub_id || 'UNK';
-            const type = ac.icao || 'UNK';
-            return `• **${ac.registration}** (${type}) — ${s.emoji} ${s.code} | Home: **${home}**`;
-          }
-        );
+  // Sort: A/M/S first, Unknown mid, R/C last
+  airportRows.sort((a, b) => {
+    const wa = statusSortWeight(a.status);
+    const wb = statusSortWeight(b.status);
+    if (wa !== wb) return wa - wb;
+    // tie-breakers
+    const ia = (a.icao || '').localeCompare(b.icao || '');
+    if (ia !== 0) return ia;
+    return (a.registration || '').localeCompare(b.registration || '');
+  });
+
+  return handlePagination(
+    interaction,
+    airportRows,
+    `Aircraft Currently at: ${input}`,
+    ac => {
+      const s = statusInfo(ac.status);
+      const type = ac.icao || 'UNK';
+      const code = (ac.status || '').toUpperCase();
+
+      // For R/C omit home
+      if (code === 'R' || code === 'C') {
+        return `• **${ac.registration}** (${type}) — ${s.emoji} ${s.code}`;
       }
+
+      const home = ac.hub_id || 'UNK';
+      return `• **${ac.registration}** (${type}) — ${s.emoji} ${s.code} | Home: **${home}**`;
+    }
+  );
+}
+
 
       // 4) Nothing found
       await interaction.editReply({
