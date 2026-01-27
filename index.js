@@ -8,12 +8,10 @@ const path = require('path');
 const turf = require('@turf/turf');
 
 const flavorTexts = require('./flavorTexts.json');
-const runBackup = require('./dbBackup'); // keeping require (even if not used here yet)
 const syncRanks = require('./rankSync');
 
 const commands = require('./commands');
 
-const BACKUP_TAG_FILE = './.last_backup_date'; // keeping constant (even if not used here yet)
 
 // ---------- Load Geo Bounds ----------
 const geoBounds = {};
