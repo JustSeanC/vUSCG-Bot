@@ -121,10 +121,6 @@ new SlashCommandBuilder()
   )
   .toJSON(),
 
-  new SlashCommandBuilder()
-  .setName('synclinks')
-  .setDescription('Backfill Discord→PilotID links from nicknames (command staff only)')
-  .toJSON(),
 new SlashCommandBuilder()
   .setName('jumpseat')
   .setDescription('Jumpseat yourself to another airport (updates your current location)')

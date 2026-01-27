@@ -6,5 +6,4 @@ module.exports = {
   mission: require('./mission'),
   moveaircraft: require('./moveaircraft'),
   jumpseat: require('./jumpseat'),
-  synclinks: require('./synclinks'),
 };
