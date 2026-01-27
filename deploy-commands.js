@@ -140,8 +140,10 @@ new SlashCommandBuilder()
   .addStringOption(o => o.setName('registration').setDescription('Aircraft registration (e.g., C6052)').setRequired(true))
   .addStringOption(o => o.setName('dep').setDescription('Departure ICAO').setRequired(true))
   .addStringOption(o => o.setName('arr').setDescription('Arrival ICAO').setRequired(true))
-  .addIntegerOption(o => o.setName('minutes').setDescription('Flight time in minutes').setRequired(true))
+  .addStringOption(o => o.setName('time').setDescription('Flight time: 90, 90m, 1.5, 1.5h, or 1:30').setRequired(true))
   .addStringOption(o => o.setName('route').setDescription('Optional route string (free text)').setRequired(false))
+  .addNumberOption(o => o.setName('distance_nm').setDescription('Optional distance in NM (overrides auto-calculated distance)').setRequired(false))
+
   .addStringOption(o => o.setName('notes').setDescription('Optional notes').setRequired(false))
   .addBooleanOption(o => o.setName('relocate').setDescription('Move pilot + aircraft to ARR after filing? (default true)').setRequired(false))
   .toJSON(),
