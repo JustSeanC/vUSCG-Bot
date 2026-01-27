@@ -16,14 +16,15 @@ module.exports = {
     // Extract pilot ID from something like "C3015 ..."
     const m = displayName.match(/\bC(\d{3,6})\b/i);
     if (!m) {
-      return interaction.reply({
-        content:
-          `❌ I couldn't find your Pilot ID in your server nickname.\n` +
-          `Your nickname needs to include something like **C3015**.\n` +
-          `Ask Command Staff to set it, then try again.`,
-        ephemeral: true,
-      });
-    }
+  return interaction.reply({
+    content:
+      `❌ I couldn't find your Pilot ID in your server nickname.\n` +
+      `I looked at: **${displayName || '(blank)'}**\n\n` +
+      `Your nickname needs to include something like **C3015**.\n` +
+      `Ask Command Staff for assistance, then try again.`,
+    ephemeral: true,
+  });
+}
 
     const pilotId = parseInt(m[1], 10);
 
