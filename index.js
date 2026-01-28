@@ -6,7 +6,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const turf = require('@turf/turf');
-
+const { startPendingPirepWatcher, handlePirepButton } = require('./utils/pendingPireps');
 const flavorTexts = require('./flavorTexts.json');
 const syncRanks = require('./rankSync');
 
@@ -159,6 +159,17 @@ async function checkIfWaterSmart(baseLat, baseLon, checkLat, checkLon) {
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 
+  // Handle PIREP button interactions
+  startPendingPirepWatcher({
+    client,
+    db,
+    guildId: process.env.GUILD_ID,
+    trainingChannelId: process.env.TRAINING_CHANNEL_ID || '1174748570948223026',
+    pirepBaseUrl: process.env.PIREP_BASE_URL || 'https://crew.vuscg.com/pireps',
+    vatsimStatsBaseUrl: process.env.VATSIM_STATS_BASE_URL || 'https://stats.vatsim.net/stats',
+    fallbackChannelId: process.env.PENDING_PIREP_FALLBACK_CHANNEL_ID || null,
+    pollSeconds: process.env.PIREP_WATCHER_POLL_SECONDS || 60,
+  });
   // Run rank sync once on startup
   try {
     syncRanks(client, db, process.env.GUILD_ID);
@@ -176,8 +187,29 @@ client.once('ready', () => {
   }, 60 * 60 * 1000);
 });
 
+
 // ---------- Command Dispatcher ----------
 client.on('interactionCreate', async interaction => {
+    // Handle PIREP approve/deny buttons ----
+  if (interaction.isButton() && String(interaction.customId || '').startsWith('pirep:')) {
+    if (!interaction.inGuild()) return;
+
+    const COMMAND_STAFF_ROLE_ID = process.env.COMMAND_STAFF_ROLE_ID;
+    const INSTRUCTOR_PILOT_ROLE_ID = process.env.INSTRUCTOR_PILOT_ROLE_ID;
+
+    const staff =
+      interaction.member ??
+      (await interaction.guild.members.fetch(interaction.user.id));
+
+    const hasRole = (roleId) => !!roleId && staff.roles.cache.has(roleId);
+
+    return handlePirepButton({
+      interaction,
+      db,
+      hasRole,
+      roles: { COMMAND_STAFF_ROLE_ID, INSTRUCTOR_PILOT_ROLE_ID },
+    });
+  }
   if (!interaction.isChatInputCommand()) return;
 
   // Block DMs (prevents interaction.guild being null)
