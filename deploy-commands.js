@@ -20,7 +20,16 @@ const commands = [
       .setDescription('Optional notes (e.g., "Needs Stage 0, hours show 55")')
       .setRequired(false)
   )
+  .addStringOption(option =>
+    option.setName('low_hours')
+      .setDescription('Optional: onboarding resources based on flight hours')
+      .setRequired(false)
+      .addChoices(
+        { name: 'Between 50 and 100 hours (Stage Zero required)', value: 'yes' },
+      )
+  )
   .toJSON(),
+
 
 new SlashCommandBuilder()
   .setName('moveaircraft')

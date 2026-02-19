@@ -20,14 +20,21 @@ module.exports = {
 
     const pilotId = interaction.options.getInteger('pilot_id');
     const targetUser = interaction.options.getUser('user');
+
     const notesRaw = interaction.options.getString('notes'); // optional
     const notes = notesRaw ? notesRaw.trim() : null;
+
+    // NEW: optional dropdown for hours band
+    const lowHours = interaction.options.getString('low_hours'); // optional
 
     const trainingChannelId = '1174748570948223026';
     const welcomeGuideChannelId = '1350568038612865154';
 
     const CADET_ROLE_ID = '1174513529253007370';
     const GUEST_ROLE_ID = '1174513627273887895';
+
+    const STAGE_ZERO_LINK =
+      'https://drive.google.com/drive/folders/1slR36azctaZclnz1D9kus9xKjv0x8XRg?usp=drive_link';
 
     const safeAddToThread = async (thread, userId) => {
       try {
@@ -39,7 +46,7 @@ module.exports = {
       }
     };
 
-await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
 
     try {
       // 1) Validate pilot exists in phpVMS
@@ -56,10 +63,7 @@ await interaction.deferReply({ ephemeral: true });
       const nickname = `C${pilotId} ${firstName} ${lastInitial}`;
 
       // 2) Update DB
-      await db.query(
-        'UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?',
-        [1, 12, pilotId]
-      );
+      await db.query('UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?', [1, 12, pilotId]);
 
       // 3) Discord member updates (best-effort)
       let member;
@@ -71,14 +75,23 @@ await interaction.deferReply({ ephemeral: true });
         });
       }
 
-      try { await member.setNickname(nickname); }
-      catch (e) { console.warn('⚠️ Nickname set failed:', e?.message ?? e); }
+      try {
+        await member.setNickname(nickname);
+      } catch (e) {
+        console.warn('⚠️ Nickname set failed:', e?.message ?? e);
+      }
 
-      try { await member.roles.add(CADET_ROLE_ID); }
-      catch (e) { console.warn('⚠️ Adding Cadet role failed:', e?.message ?? e); }
+      try {
+        await member.roles.add(CADET_ROLE_ID);
+      } catch (e) {
+        console.warn('⚠️ Adding Cadet role failed:', e?.message ?? e);
+      }
 
-      try { await member.roles.remove(GUEST_ROLE_ID); }
-      catch (e) { console.warn('⚠️ Removing Guest role failed:', e?.message ?? e); }
+      try {
+        await member.roles.remove(GUEST_ROLE_ID);
+      } catch (e) {
+        console.warn('⚠️ Removing Guest role failed:', e?.message ?? e);
+      }
 
       // 4) Create private thread
       const trainingChannel = await interaction.guild.channels.fetch(trainingChannelId);
@@ -87,13 +100,14 @@ await interaction.deferReply({ ephemeral: true });
           content: `❌ Could not find training channel (${trainingChannelId}).`,
         });
       }
-      
-await db.query(
-  `INSERT INTO discord_links (discord_id, pilot_id)
-   VALUES (?, ?)
-   ON DUPLICATE KEY UPDATE pilot_id = VALUES(pilot_id), linked_at = CURRENT_TIMESTAMP`,
-  [targetUser.id, pilotId]
-);
+
+      // Link discord_id <-> pilot_id
+      await db.query(
+        `INSERT INTO discord_links (discord_id, pilot_id)
+         VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE pilot_id = VALUES(pilot_id), linked_at = CURRENT_TIMESTAMP`,
+        [targetUser.id, pilotId]
+      );
 
       const thread = await trainingChannel.threads.create({
         name: `Training Case for C${pilotId}`,
@@ -124,14 +138,15 @@ await db.query(
         console.warn('⚠️ INSTRUCTOR_PILOT_ROLE_ID missing in .env; no instructors auto-added.');
       }
 
-      let ok = 0, fail = 0;
+      let ok = 0,
+        fail = 0;
       for (const id of toAdd) {
         const added = await safeAddToThread(thread, id);
         if (added) ok++;
         else fail++;
       }
 
-      // 6) Kickoff message (NO role ping)
+      // 6) Kickoff message
       let kickoff =
         `Welcome <@${targetUser.id}> — your account has been activated and you are ready to begin training.\n` +
         `Please view <#${welcomeGuideChannelId}> for our ACARS information and let us know here which training path you would like to follow first — **Fixed Wing** or **Rotary Wing**.`;
@@ -140,14 +155,27 @@ await db.query(
 
       await thread.send(kickoff);
 
+      // 6b) NEW: Stage Zero follow-up message (only when hours band is selected)
+      if (lowHours === 'yes') {
+        await thread.send(
+          `📘 **Stage Zero Flight Course (50–100 hours)**\n` +
+            `Because your VATSIM records show that you have **between 50 and 100 hours**, please complete our required **Stage Zero** course before continuing:\n` +
+            `${STAGE_ZERO_LINK}\n\n` +
+            `To complete Stage Zero properly, please ensure you read the Welcome Guide found in the folder first before beginning the training stage. \n` +
+            `As you complete each flight, an Instructor Pilot will review. You can continue moving forward even if an Instructor Pilot has not yet reviewed a flight. \n` +
+            `If there are any issues, you will be asked to re-do a specific portion of the flight. \n` +
+            `Once you complete all of the Stage Zero flights, an Instructor Pilot will guide you in your journey to becoming a fully mission rated pilot of the vUSCG!`
+        );
+      }
+
       // 7) Confirm
       await interaction.editReply({
         content:
           `✅ Activated <@${targetUser.id}> as **${nickname}** (Pilot ID ${pilotId}).\n` +
           `✅ Private training thread created: **${thread.name}**\n` +
-          `➕ Thread adds: ${ok} succeeded, ${fail} failed (non-fatal).`,
+          `➕ Thread adds: ${ok} succeeded, ${fail} failed (non-fatal).` +
+          (lowHours === 'yes' ? `\n📘 Stage Zero link posted (50–100 hours selected).` : ''),
       });
-
     } catch (err) {
       console.error('❌ Error in activate command:', err);
       try {
