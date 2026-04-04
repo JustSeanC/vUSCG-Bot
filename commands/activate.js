@@ -29,10 +29,10 @@ module.exports = {
 
     const trainingChannelId = '1174748570948223026';
     const welcomeGuideChannelId = '1350568038612865154';
-
+    const registrationChannelId = '1357177317486628905';
+    const ronUserId = '396783529327067136';
     const CADET_ROLE_ID = '1174513529253007370';
     const GUEST_ROLE_ID = '1174513627273887895';
-
     const STAGE_ZERO_LINK =
       'https://drive.google.com/drive/folders/1slR36azctaZclnz1D9kus9xKjv0x8XRg?usp=drive_link';
 
@@ -45,7 +45,64 @@ module.exports = {
         return false;
       }
     };
+const getEmbedFieldValue = (embed, fieldName) => {
+  const field = embed.fields?.find(
+    f => String(f.name).trim().toLowerCase() === String(fieldName).trim().toLowerCase()
+  );
+  return field?.value ?? null;
+};
 
+const normalizePilotId = value => String(value ?? '').replace(/\D/g, '');
+
+const logActivationToRegistrationChannel = async ({
+  guild,
+  interaction,
+  pilotId,
+  fullName,
+  nickname,
+  targetUser,
+}) => {
+  try {
+    const registrationChannel = await guild.channels.fetch(registrationChannelId);
+
+    if (!registrationChannel || !registrationChannel.isTextBased()) {
+      return 'failed (registration channel not found or not text-based)';
+    }
+
+    const messages = await registrationChannel.messages.fetch({ limit: 100 });
+
+    const matchingMessage = messages.find(msg => {
+      if (!msg.embeds?.length) return false;
+
+      return msg.embeds.some(embed => {
+        const pilotField = getEmbedFieldValue(embed, 'Pilot ID');
+        return normalizePilotId(pilotField) === String(pilotId);
+      });
+    });
+
+    const activatedBy =
+      interaction.member?.displayName ||
+      interaction.user.globalName ||
+      interaction.user.username;
+
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    const content =
+      `✅ **C${pilotId}** (**${fullName}**) has been activated by **${activatedBy}** at <t:${timestamp}:F>.\n` +
+      `Discord user: **${targetUser.username}** | Nickname set to **${nickname}**`;
+
+    if (matchingMessage) {
+      await matchingMessage.reply({ content });
+      return 'replied to original registration post';
+    }
+
+    await registrationChannel.send({ content });
+    return 'posted new activation message (original registration post not found)';
+  } catch (err) {
+    console.warn('⚠️ Could not log activation to registration channel:', err?.message ?? err);
+    return `failed (${err?.message ?? 'unknown error'})`;
+  }
+};
     await interaction.deferReply({ ephemeral: true });
 
     try {
@@ -117,49 +174,41 @@ module.exports = {
         invitable: true,
       });
 
-      // 5) Add target + command runner + ALL instructor pilots
-      const toAdd = new Set();
-      toAdd.add(targetUser.id);
-      toAdd.add(interaction.user.id);
+      // 5) Add only target + command runner + Ron
+const toAdd = new Set();
+toAdd.add(targetUser.id);
+toAdd.add(interaction.user.id);
+toAdd.add(ronUserId);
 
-      if (roles.INSTRUCTOR_PILOT_ROLE_ID) {
-        try {
-          // Ensure role.members is populated (requires GuildMembers intent enabled in Dev Portal)
-          await interaction.guild.members.fetch({ withPresences: false });
-
-          const role = await interaction.guild.roles.fetch(roles.INSTRUCTOR_PILOT_ROLE_ID);
-          if (role) {
-            for (const [id] of role.members) toAdd.add(id);
-          }
-        } catch (e) {
-          console.warn('⚠️ Could not fetch/invite instructor role members:', e?.message ?? e);
-        }
-      } else {
-        console.warn('⚠️ INSTRUCTOR_PILOT_ROLE_ID missing in .env; no instructors auto-added.');
-      }
-
-      let ok = 0,
-        fail = 0;
-      for (const id of toAdd) {
-        const added = await safeAddToThread(thread, id);
-        if (added) ok++;
-        else fail++;
-      }
+let ok = 0,
+  fail = 0;
+for (const id of toAdd) {
+  const added = await safeAddToThread(thread, id);
+  if (added) ok++;
+  else fail++;
+}
 
       // 6) Kickoff message
-      let kickoff =
-        `Welcome <@${targetUser.id}> — your account has been activated and you are ready to begin training.\n` +
-        `Please view <#${welcomeGuideChannelId}> for our ACARS information and let us know here which training path you would like to follow first — **Fixed Wing** or **Rotary Wing**.`;
+let kickoff =
+  `${roles.INSTRUCTOR_PILOT_ROLE_ID ? `<@&${roles.INSTRUCTOR_PILOT_ROLE_ID}> ` : ''}` +
+  `Welcome <@${targetUser.id}> — your account has been activated and you are ready to begin training.\n` +
+  `Please view <#${welcomeGuideChannelId}> for our ACARS information and let us know here which training path you would like to follow first — **Fixed Wing** or **Rotary Wing**.`;
 
-      if (notes) kickoff += `\n\n**Activation notes:** ${notes}`;
+if (notes) kickoff += `\n\n**Activation notes:** ${notes}`;
 
-      await thread.send(kickoff);
+await thread.send({
+  content: kickoff,
+  allowedMentions: {
+    users: [targetUser.id],
+    roles: roles.INSTRUCTOR_PILOT_ROLE_ID ? [roles.INSTRUCTOR_PILOT_ROLE_ID] : [],
+  },
+});
 
       // 6b) NEW: Stage Zero follow-up message (only when hours band is selected)
       if (lowHours === 'yes') {
         await thread.send(
           `📘 **Stage Zero Flight Course (50–100 hours)**\n` +
-            `Because your VATSIM records show that you have **between 50 and 100 hours**, please complete our required **Stage Zero** course before continuing:\n` +
+            `Because your VATSIM records show that you have **less than 100 hours**, please complete our required **Stage Zero** course before continuing:\n` +
             `${STAGE_ZERO_LINK}\n\n` +
             `To complete Stage Zero properly, please ensure you read the Welcome Guide found in the folder first before beginning the training stage. \n` +
             `As you complete each flight, an Instructor Pilot will review. You can continue moving forward even if an Instructor Pilot has not yet reviewed a flight. \n` +
@@ -168,21 +217,32 @@ module.exports = {
         );
       }
 
-      // 7) Confirm
-      await interaction.editReply({
-        content:
-          `✅ Activated <@${targetUser.id}> as **${nickname}** (Pilot ID ${pilotId}).\n` +
-          `✅ Private training thread created: **${thread.name}**\n` +
-          `➕ Thread adds: ${ok} succeeded, ${fail} failed (non-fatal).` +
-          (lowHours === 'yes' ? `\n📘 Stage Zero link posted (50–100 hours selected).` : ''),
-      });
+      // 7) Log activation in registration channel
+const registrationLogStatus = await logActivationToRegistrationChannel({
+  guild: interaction.guild,
+  interaction,
+  pilotId,
+  fullName,
+  nickname,
+  targetUser,
+});
+
+// 8) Confirm
+await interaction.editReply({
+  content:
+    `✅ Activated <@${targetUser.id}> as **${nickname}** (Pilot ID ${pilotId}).\n` +
+    `✅ Private training thread created: **${thread.name}**\n` +
+    `➕ Thread adds: ${ok} succeeded, ${fail} failed (non-fatal).\n` +
+    `📝 Registration log: ${registrationLogStatus}` +
+    (lowHours === 'yes' ? `\n📘 Stage Zero link posted (50–100 hours selected).` : ''),
+});
+
     } catch (err) {
-      console.error('❌ Error in activate command:', err);
-      try {
-        await interaction.editReply({ content: '❌ An error occurred during activation.' });
-      } catch {
-        console.warn('⚠️ Interaction expired before bot could reply.');
-      }
+      console.error('❌ /activate error:', err);
+      return interaction.editReply({
+        content: `❌ Activation failed: ${err?.message ?? err}`,
+      });
     }
   },
 };
+    
