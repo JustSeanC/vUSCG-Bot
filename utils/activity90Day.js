@@ -60,6 +60,25 @@ async function fetchActivePilots(db) {
   return rows || [];
 }
 
+
+function formatPilotList(rows, limit = 1024) {
+  if (!rows.length) return 'None';
+
+  const items = rows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`);
+  let out = '';
+
+  for (let i = 0; i < items.length; i++) {
+    const candidate = `${out}${out ? ', ' : ''}${items[i]}`;
+    if (candidate.length > limit) {
+      const remaining = items.length - i;
+      return `${out} … (+${remaining} more)`;
+    }
+    out = candidate;
+  }
+
+  return out || 'None';
+}
+
 function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
   const todayEt = todayInEasternISO();
   const lookback = todayInEasternISO(new Date(Date.now() - (90 * MS_PER_DAY)));
@@ -71,13 +90,11 @@ function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
       { name: 'Today (ET)', value: todayEt, inline: true },
       { name: 'Active Window', value: `${lookback} → ${todayEt}`, inline: true },
       { name: 'Active Pilots', value: String(activeRows.length), inline: true },
-      {
-        name: 'Delta Since Last Daily Check',
-        value:
-          `**Added:** ${addedRows.length ? addedRows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`).join(', ') : 'None'}\n` +
-          `**Removed:** ${removedRows.length ? removedRows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`).join(', ') : 'None'}`,
-        inline: false,
-      }
+      { name: 'Added Count', value: String(addedRows.length), inline: true },
+      { name: 'Removed Count', value: String(removedRows.length), inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+      { name: 'Added Pilots', value: formatPilotList(addedRows), inline: false },
+      { name: 'Removed Pilots', value: formatPilotList(removedRows), inline: false },
     );
 
   if (!isMonthlyFull) return [summary];
