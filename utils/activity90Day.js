@@ -60,34 +60,55 @@ async function fetchActivePilots(db) {
   return rows || [];
 }
 
-
 function formatPilotList(rows, limit = 1024) {
-  if (!rows.length) return 'None';
+  if (!rows.length) return '• None';
 
-  const items = rows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`);
+  const items = rows.map(r => {
+    const vatsim = (r.vatsim_cid || 'Unknown').trim();
+    return `• ${r.name || 'Unknown'} | vUSCG C${r.pilot_id} | VATSIM ${vatsim}`;
+  });
+
   let out = '';
-
   for (let i = 0; i < items.length; i++) {
     const remainingAfterThis = items.length - (i + 1);
-    const suffix = remainingAfterThis > 0 ? ` … (+${remainingAfterThis} more)` : '';
-    const candidate = `${out}${out ? ', ' : ''}${items[i]}`;
+    const suffix = remainingAfterThis > 0 ? `\n… (+${remainingAfterThis} more)` : '';
+    const candidate = `${out}${out ? '\n' : ''}${items[i]}`;
 
     if ((candidate + suffix).length > limit) {
       const remainingNow = items.length - i;
-      const forcedSuffix = ` … (+${remainingNow} more)`;
-
+      const forcedSuffix = `\n… (+${remainingNow} more)`;
       if ((out + forcedSuffix).length > limit) {
         const maxOutLen = Math.max(0, limit - forcedSuffix.length);
-        out = out.slice(0, maxOutLen).replace(/[\s,]+$/, '');
+        out = out.slice(0, maxOutLen).replace(/[\s,\n]+$/, '');
       }
-
-      return `${out}${forcedSuffix}` || 'None';
+      return `${out}${forcedSuffix}` || '• None';
     }
 
     out = candidate;
   }
 
-  return out || 'None';
+  return out || '• None';
+}
+
+function chunkLines(lines, maxChars = 3800, maxLines = 30) {
+  const chunks = [];
+  let cur = [];
+  let curLen = 0;
+
+  for (const line of lines) {
+    const addLen = (cur.length ? 1 : 0) + line.length;
+    if (cur.length >= maxLines || (curLen + addLen) > maxChars) {
+      if (cur.length) chunks.push(cur);
+      cur = [line];
+      curLen = line.length;
+    } else {
+      cur.push(line);
+      curLen += addLen;
+    }
+  }
+
+  if (cur.length) chunks.push(cur);
+  return chunks;
 }
 
 function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
@@ -97,33 +118,40 @@ function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
   const summary = new EmbedBuilder()
     .setTitle('📊 90-Day Activity Checker')
     .setColor(0x3498db)
+    .setDescription('Daily status snapshot (90-day rule)')
     .addFields(
       { name: 'Today (ET)', value: todayEt, inline: true },
-      { name: 'Active Window', value: `${lookback} → ${todayEt}`, inline: true },
+      { name: 'Window Start (ET)', value: lookback, inline: true },
+      { name: 'Window End (ET)', value: todayEt, inline: true },
       { name: 'Active Pilots', value: String(activeRows.length), inline: true },
-      { name: 'Added Count', value: String(addedRows.length), inline: true },
-      { name: 'Removed Count', value: String(removedRows.length), inline: true },
-      { name: '\u200B', value: '\u200B', inline: true },
-      { name: 'Added Pilots', value: formatPilotList(addedRows), inline: false },
-      { name: 'Removed Pilots', value: formatPilotList(removedRows), inline: false },
+      { name: 'Added Since Last Check', value: String(addedRows.length), inline: true },
+      { name: 'Removed Since Last Check', value: String(removedRows.length), inline: true },
+      { name: '✅ Added Pilots', value: formatPilotList(addedRows), inline: false },
+      { name: '❌ Removed Pilots', value: formatPilotList(removedRows), inline: false },
     );
 
-  if (!isMonthlyFull) return [summary];
+  const embeds = [summary];
+  if (!isMonthlyFull) return embeds;
 
   const lines = activeRows.length
     ? activeRows.map(r => {
-        const trainee = Number(r.rank_id) === 12 ? ' • 🧑‍🎓 ENS Trainee' : '';
+        const trainee = Number(r.rank_id) === 12 ? ' | ENS Trainee' : '';
         const vatsim = (r.vatsim_cid || 'Unknown').trim();
-        return `• **${r.name || 'Unknown Name'}** — vUSCG: **C${r.pilot_id}** | VATSIM: **${vatsim}**${trainee}`;
+        return `• ${r.name || 'Unknown Name'} | vUSCG C${r.pilot_id} | VATSIM ${vatsim}${trainee}`;
       })
-    : ['No active pilots found.'];
+    : ['• No active pilots found.'];
 
-  const full = new EmbedBuilder()
-    .setTitle('📋 Full Active List (Monthly Snapshot)')
-    .setColor(0x2ecc71)
-    .setDescription(lines.join('\n').slice(0, 4096));
+  const pages = chunkLines(lines);
+  pages.forEach((pageLines, idx) => {
+    embeds.push(
+      new EmbedBuilder()
+        .setTitle(`📋 Full Active List (Monthly) — Page ${idx + 1}/${pages.length}`)
+        .setColor(0x2ecc71)
+        .setDescription(pageLines.join('\n'))
+    );
+  });
 
-  return [summary, full];
+  return embeds;
 }
 
 async function runActivity90DayReport({ client, db, channelId, force = false, dryRun = false }) {
@@ -141,7 +169,12 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
   let removedRows = [];
   if (removedPilotIds.length) {
     const [rows] = await db.query(
-      `SELECT pilot_id, name FROM users WHERE pilot_id IN (${removedPilotIds.map(() => '?').join(',')})`,
+      `SELECT u.pilot_id, u.name, ufv.value AS vatsim_cid
+       FROM users u
+       LEFT JOIN user_field_values ufv
+         ON ufv.user_id = u.id
+        AND ufv.user_field_id = 1
+       WHERE u.pilot_id IN (${removedPilotIds.map(() => '?').join(',')})`,
       removedPilotIds
     );
     removedRows = rows || [];
