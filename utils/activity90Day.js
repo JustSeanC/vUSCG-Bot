@@ -235,7 +235,7 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
   let removedRows = [];
   if (removedPilotIds.length) {
     const [rows] = await db.query(
-      `SELECT u.pilot_id, u.name, ufv.value AS vatsim_cid
+      `SELECT u.pilot_id, u.name, u.rank_id, ufv.value AS vatsim_cid
        FROM users u
        LEFT JOIN user_field_values ufv
          ON ufv.user_id = u.id
