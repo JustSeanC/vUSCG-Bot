@@ -168,6 +168,12 @@ new SlashCommandBuilder()
     )
     .toJSON(),
 
+
+  new SlashCommandBuilder()
+    .setName('activity90')
+    .setDescription('Force-run the 90-day pilot activity report (Admin only)')
+    .toJSON(),
+
     new SlashCommandBuilder()
   .setName('forceranksync')
   .setDescription('Force recalculation of all pilot ranks based on hours (Admin only)')

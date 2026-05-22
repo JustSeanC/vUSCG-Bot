@@ -1,4 +1,5 @@
 const fs = require('fs');
+const { EmbedBuilder } = require('discord.js');
 
 const CACHE_PATH = './activity_90d_cache.json';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -32,7 +33,7 @@ function shouldPostNow(now = new Date()) {
   }).formatToParts(now);
   const hour = Number(et.find(p => p.type === 'hour')?.value ?? 0);
   const minute = Number(et.find(p => p.type === 'minute')?.value ?? 0);
-  return hour === 22 && minute <= 10; // 10:00pm ET window
+  return hour === 22 && minute <= 10;
 }
 
 async function fetchActivePilots(db) {
@@ -59,37 +60,48 @@ async function fetchActivePilots(db) {
   return rows || [];
 }
 
-function buildPost({ activeRows, addedRows, removedRows, isMonthlyFull }) {
+function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
   const todayEt = todayInEasternISO();
   const lookback = todayInEasternISO(new Date(Date.now() - (90 * MS_PER_DAY)));
 
-  const header =
-    `📊 **90-Day Activity Checker**\n` +
-    `Today (ET): **${todayEt}**\n` +
-    `Active window: **${lookback} → ${todayEt}**\n` +
-    `Active pilots: **${activeRows.length}**`;
+  const summary = new EmbedBuilder()
+    .setTitle('📊 90-Day Activity Checker')
+    .setColor(0x3498db)
+    .addFields(
+      { name: 'Today (ET)', value: todayEt, inline: true },
+      { name: 'Active Window', value: `${lookback} → ${todayEt}`, inline: true },
+      { name: 'Active Pilots', value: String(activeRows.length), inline: true },
+      {
+        name: 'Delta Since Last Daily Check',
+        value:
+          `**Added:** ${addedRows.length ? addedRows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`).join(', ') : 'None'}\n` +
+          `**Removed:** ${removedRows.length ? removedRows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`).join(', ') : 'None'}`,
+        inline: false,
+      }
+    );
 
-  const fullList = isMonthlyFull
-    ? `\n\n**Full Active List (Monthly Snapshot)**\n${activeRows.length
-        ? activeRows.map(r => {
-            const trainee = Number(r.rank_id) === 12 ? ' • 🧑‍🎓 Trainee (O-1 ENS)' : '';
-            const vatsim = (r.vatsim_cid || 'Unknown').trim();
-            return `• **${r.name || 'Unknown Name'}** — vUSCG: **C${r.pilot_id}** | VATSIM: **${vatsim}**${trainee}`;
-          }).join('\n')
-        : 'No active pilots found.'}`
-    : '';
+  if (!isMonthlyFull) return [summary];
 
-  const delta = `\n\n**Delta Since Last Daily Check**\n` +
-    `Added: ${addedRows.length ? addedRows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`).join(', ') : 'None'}\n` +
-    `Removed: ${removedRows.length ? removedRows.map(r => `${r.name || 'Unknown'} (C${r.pilot_id})`).join(', ') : 'None'}`;
+  const lines = activeRows.length
+    ? activeRows.map(r => {
+        const trainee = Number(r.rank_id) === 12 ? ' • 🧑‍🎓 ENS Trainee' : '';
+        const vatsim = (r.vatsim_cid || 'Unknown').trim();
+        return `• **${r.name || 'Unknown Name'}** — vUSCG: **C${r.pilot_id}** | VATSIM: **${vatsim}**${trainee}`;
+      })
+    : ['No active pilots found.'];
 
-  return `${header}${fullList}${delta}`;
+  const full = new EmbedBuilder()
+    .setTitle('📋 Full Active List (Monthly Snapshot)')
+    .setColor(0x2ecc71)
+    .setDescription(lines.join('\n').slice(0, 4096));
+
+  return [summary, full];
 }
 
-async function runOnce({ client, db, channelId }) {
+async function runActivity90DayReport({ client, db, channelId, force = false, dryRun = false }) {
   const cache = loadCache();
   const todayEt = todayInEasternISO();
-  if (cache.lastPostedDate === todayEt) return;
+  if (!force && cache.lastPostedDate === todayEt) return { skipped: true, reason: 'already_posted_today' };
 
   const activeRows = await fetchActivePilots(db);
   const oldSet = new Set((cache.activePilotIds || []).map(Number));
@@ -109,28 +121,27 @@ async function runOnce({ client, db, channelId }) {
 
   const etDay = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', day: 'numeric' }).format(new Date());
   const isMonthlyFull = etDay === '1';
-  const content = buildPost({ activeRows, addedRows, removedRows, isMonthlyFull });
+  const embeds = buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull });
 
-  const ch = await client.channels.fetch(channelId);
-  if (ch?.isTextBased()) {
-    await ch.send({ content });
+  if (!dryRun) {
+    const ch = await client.channels.fetch(channelId);
+    if (ch?.isTextBased()) await ch.send({ embeds });
+    saveCache({ lastPostedDate: todayEt, activePilotIds: activeRows.map(r => Number(r.pilot_id)) });
   }
 
-  saveCache({ lastPostedDate: todayEt, activePilotIds: activeRows.map(r => Number(r.pilot_id)) });
-  console.log(`✅ 90-day activity report posted for ${todayEt}.`);
+  return { skipped: false, activeCount: activeRows.length, added: addedRows.length, removed: removedRows.length, embeds };
 }
 
 function startActivity90DayReporter({ client, db, channelId = '1507352324194959360', pollMs = 5 * 60 * 1000 }) {
   const tick = async () => {
     try {
-      if (shouldPostNow()) await runOnce({ client, db, channelId });
+      if (shouldPostNow()) await runActivity90DayReport({ client, db, channelId });
     } catch (e) {
       console.warn('⚠️ 90-day activity reporter tick failed:', e?.message ?? e);
     }
   };
-
   tick();
   setInterval(tick, pollMs);
 }
 
-module.exports = { startActivity90DayReporter };
+module.exports = { startActivity90DayReporter, runActivity90DayReport };
