@@ -29,6 +29,14 @@ function statusInfo(codeRaw) {
   }
 }
 
+
+function formatMinutesHHMM(totalMinutes) {
+  const mins = Math.max(0, parseInt(totalMinutes, 10) || 0);
+  const h = Math.floor(mins / 60);
+  const m = String(mins % 60).padStart(2, '0');
+  return `${h}:${m}`;
+}
+
 async function handlePagination(interaction, dataRows, title, formatRow) {
   const pageSize = 10;
   let page = 0;
@@ -125,6 +133,27 @@ module.exports = {
         const hours = ac.flight_time != null ? (ac.flight_time / 60).toFixed(1) : '0.0';
         const s = statusInfo(ac.status);
 
+        const [recentPireps] = await db.query(
+          `SELECT p.submitted_at, p.dpt_airport_id, p.arr_airport_id, p.flight_time, u.pilot_id
+           FROM pireps p
+           LEFT JOIN users u ON u.id = p.user_id
+           LEFT JOIN aircraft a ON a.id = p.aircraft_id
+           WHERE a.registration = ?
+           ORDER BY p.submitted_at DESC, p.created_at DESC
+           LIMIT 3`,
+          [ac.registration]
+        );
+
+        const recentActivity = recentPireps.length
+          ? recentPireps.map((p, idx) => {
+              const cid = p.pilot_id ? `C${p.pilot_id}` : 'Unknown CID';
+              const from = p.dpt_airport_id || 'UNK';
+              const to = p.arr_airport_id || 'UNK';
+              const time = formatMinutesHHMM(p.flight_time);
+              return `${idx + 1}. **${cid}** • ${from} → ${to} • **${time}**`;
+            }).join('\n')
+          : 'No filed PIREPs found for this aircraft.';
+
         const embed = new EmbedBuilder()
           .setTitle(`Aircraft: ${ac.registration}`)
           .addFields(
@@ -133,6 +162,7 @@ module.exports = {
             { name: 'Total Flight Time', value: `${hours} hours`, inline: true },
             { name: 'Current Location', value: ac.airport_id || 'Unknown', inline: true },
             { name: 'Home Location', value: ac.hub_id || 'Unknown', inline: true },
+            { name: 'Recent Activity (Last 3 Filed PIREPs)', value: recentActivity, inline: false },
           )
           .setColor('Blue');
 

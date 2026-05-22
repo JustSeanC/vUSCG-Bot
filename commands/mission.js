@@ -64,7 +64,7 @@ module.exports = {
         else if (missionDuration === 'medium') { minNM = 20; maxNM = 100; }
         else if (missionDuration === 'long') { minNM = 80; maxNM = 300; }
 
-        while (!foundWater) {
+        while (!foundWater && attempt < maxAttempts) {
           const bearing = Math.random() * 360;
           const distance = Math.max(minNM + Math.random() * (maxNM - minNM), 0.5);
           const radians = bearing * (Math.PI / 180);
