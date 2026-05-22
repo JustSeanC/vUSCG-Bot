@@ -11,6 +11,8 @@ module.exports = {
       });
     }
 
+    const showFullList = interaction.options.getBoolean('show_full_list') ?? true;
+
     await interaction.deferReply({ ephemeral: true });
 
     try {
@@ -20,6 +22,7 @@ module.exports = {
         db,
         channelId: '1507352324194959360',
         force: true,
+        showFullList,
       });
 
       if (result?.skipped) {

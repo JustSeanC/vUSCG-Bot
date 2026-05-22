@@ -111,7 +111,7 @@ function chunkLines(lines, maxChars = 3800, maxLines = 30) {
   return chunks;
 }
 
-function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
+function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList }) {
   const todayEt = todayInEasternISO();
   const lookback = todayInEasternISO(new Date(Date.now() - (90 * MS_PER_DAY)));
 
@@ -131,7 +131,7 @@ function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
     );
 
   const embeds = [summary];
-  if (!isMonthlyFull) return embeds;
+  if (!includeFullList) return embeds;
 
   const lines = activeRows.length
     ? activeRows.map(r => {
@@ -154,7 +154,7 @@ function buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull }) {
   return embeds;
 }
 
-async function runActivity90DayReport({ client, db, channelId, force = false, dryRun = false }) {
+async function runActivity90DayReport({ client, db, channelId, force = false, dryRun = false, showFullList = false }) {
   const cache = loadCache();
   const todayEt = todayInEasternISO();
   if (!force && cache.lastPostedDate === todayEt) return { skipped: true, reason: 'already_posted_today' };
@@ -182,7 +182,8 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
 
   const etDay = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', day: 'numeric' }).format(new Date());
   const isMonthlyFull = etDay === '1';
-  const embeds = buildEmbeds({ activeRows, addedRows, removedRows, isMonthlyFull });
+  const includeFullList = showFullList || isMonthlyFull;
+  const embeds = buildEmbeds({ activeRows, addedRows, removedRows, includeFullList });
 
   if (!dryRun) {
     const ch = await client.channels.fetch(channelId);
