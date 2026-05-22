@@ -8,7 +8,7 @@ function loadCache() {
   try {
     return JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
   } catch {
-    return { activePilotIds: [], lastPostedDate: null };
+    return { activePilotIds: [], activeTraineePilotIds: [], lastPostedDate: null };
   }
 }
 
@@ -143,21 +143,30 @@ async function sendPaginatedEmbeds(channel, embeds) {
   });
 }
 
-function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList }) {
+function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList, promotedOutOfEnsRows, movedIntoEnsRows }) {
   const todayEt = todayInEasternISO();
   const lookback = todayInEasternISO(new Date(Date.now() - (90 * MS_PER_DAY)));
+
+  const activeTrainees = activeRows.filter(r => Number(r.rank_id) === 12).length;
+  const addedTrainees = addedRows.filter(r => Number(r.rank_id) === 12).length;
+  const removedTrainees = removedRows.filter(r => Number(r.rank_id) === 12).length;
 
   const summary = new EmbedBuilder()
     .setTitle('📊 90-Day Activity Checker')
     .setColor(0x3498db)
-    .setDescription('Daily status snapshot (90-day rule)')
+    .setDescription('Daily status snapshot (90-day rule)\nNote: ENS trainees do not receive M ratings.')
     .addFields(
-      { name: 'Today (ET)', value: todayEt, inline: true },
-      { name: 'Window Start (ET)', value: lookback, inline: true },
-      { name: 'Window End (ET)', value: todayEt, inline: true },
+      { name: 'Today', value: todayEt, inline: true },
+      { name: 'Window Start', value: lookback, inline: true },
+      { name: 'Window End', value: todayEt, inline: true },
       { name: 'Active Pilots', value: String(activeRows.length), inline: true },
       { name: 'Added Since Last Check', value: String(addedRows.length), inline: true },
       { name: 'Removed Since Last Check', value: String(removedRows.length), inline: true },
+      { name: 'Active Trainees (ENS)', value: String(activeTrainees), inline: true },
+      { name: 'Added Trainees (ENS)', value: String(addedTrainees), inline: true },
+      { name: 'Removed Trainees (ENS)', value: String(removedTrainees), inline: true },
+      { name: 'Promoted ENS → O-2+', value: formatPilotList(promotedOutOfEnsRows || []), inline: false },
+      { name: 'Moved Into ENS', value: formatPilotList(movedIntoEnsRows || []), inline: false },
       { name: '✅ Added Pilots', value: formatPilotList(addedRows), inline: false },
       { name: '❌ Removed Pilots', value: formatPilotList(removedRows), inline: false },
     );
@@ -214,12 +223,19 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
   const newSet = new Set(activeRows.map(r => Number(r.pilot_id)));
 
   const addedRows = activeRows.filter(r => !oldSet.has(Number(r.pilot_id)));
+
+  const oldTraineeSet = new Set((cache.activeTraineePilotIds || []).map(Number));
+  const newTraineeSet = new Set(activeRows.filter(r => Number(r.rank_id) === 12).map(r => Number(r.pilot_id)));
+
+  const promotedOutOfEnsRows = activeRows.filter(r => oldTraineeSet.has(Number(r.pilot_id)) && !newTraineeSet.has(Number(r.pilot_id)));
+  const movedIntoEnsRows = activeRows.filter(r => !oldTraineeSet.has(Number(r.pilot_id)) && newTraineeSet.has(Number(r.pilot_id)));
+
   const removedPilotIds = [...oldSet].filter(id => !newSet.has(id));
 
   let removedRows = [];
   if (removedPilotIds.length) {
     const [rows] = await db.query(
-      `SELECT u.pilot_id, u.name, ufv.value AS vatsim_cid
+      `SELECT u.pilot_id, u.name, u.rank_id, ufv.value AS vatsim_cid
        FROM users u
        LEFT JOIN user_field_values ufv
          ON ufv.user_id = u.id
@@ -233,12 +249,23 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
   const etDay = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', day: 'numeric' }).format(new Date());
   const isMonthlyFull = etDay === '1';
   const includeFullList = showFullList || isMonthlyFull;
-  const embeds = buildEmbeds({ activeRows, addedRows, removedRows, includeFullList });
+  const embeds = buildEmbeds({
+    activeRows,
+    addedRows,
+    removedRows,
+    includeFullList,
+    promotedOutOfEnsRows,
+    movedIntoEnsRows,
+  });
 
   if (!dryRun) {
     const ch = await client.channels.fetch(channelId);
     if (ch?.isTextBased()) await sendPaginatedEmbeds(ch, embeds);
-    saveCache({ lastPostedDate: todayEt, activePilotIds: activeRows.map(r => Number(r.pilot_id)) });
+    saveCache({
+      lastPostedDate: todayEt,
+      activePilotIds: activeRows.map(r => Number(r.pilot_id)),
+      activeTraineePilotIds: activeRows.filter(r => Number(r.rank_id) === 12).map(r => Number(r.pilot_id)),
+    });
   }
 
   return { skipped: false, activeCount: activeRows.length, added: addedRows.length, removed: removedRows.length, embeds };
