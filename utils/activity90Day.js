@@ -68,11 +68,22 @@ function formatPilotList(rows, limit = 1024) {
   let out = '';
 
   for (let i = 0; i < items.length; i++) {
+    const remainingAfterThis = items.length - (i + 1);
+    const suffix = remainingAfterThis > 0 ? ` … (+${remainingAfterThis} more)` : '';
     const candidate = `${out}${out ? ', ' : ''}${items[i]}`;
-    if (candidate.length > limit) {
-      const remaining = items.length - i;
-      return `${out} … (+${remaining} more)`;
+
+    if ((candidate + suffix).length > limit) {
+      const remainingNow = items.length - i;
+      const forcedSuffix = ` … (+${remainingNow} more)`;
+
+      if ((out + forcedSuffix).length > limit) {
+        const maxOutLen = Math.max(0, limit - forcedSuffix.length);
+        out = out.slice(0, maxOutLen).replace(/[\s,]+$/, '');
+      }
+
+      return `${out}${forcedSuffix}` || 'None';
     }
+
     out = candidate;
   }
 
