@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const CACHE_PATH = './activity_90d_cache.json';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -111,6 +111,34 @@ function chunkLines(lines, maxChars = 3800, maxLines = 30) {
   return chunks;
 }
 
+
+async function sendPaginatedEmbeds(channel, embeds) {
+  if (!embeds.length) return;
+  if (embeds.length === 1) {
+    await channel.send({ embeds: [embeds[0]] });
+    return;
+  }
+
+  let page = 0;
+  const buildRow = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('activity90:prev').setLabel('⬅️ Previous').setStyle(ButtonStyle.Primary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId('activity90:next').setLabel('Next ➡️').setStyle(ButtonStyle.Primary).setDisabled(page === embeds.length - 1)
+  );
+
+  const msg = await channel.send({ embeds: [embeds[page]], components: [buildRow()] });
+  const collector = msg.createMessageComponentCollector({ time: 24 * 60 * 60 * 1000 });
+
+  collector.on('collect', async i => {
+    if (i.customId === 'activity90:next' && page < embeds.length - 1) page++;
+    if (i.customId === 'activity90:prev' && page > 0) page--;
+    await i.update({ embeds: [embeds[page]], components: [buildRow()] });
+  });
+
+  collector.on('end', async () => {
+    try { await msg.edit({ components: [] }); } catch {}
+  });
+}
+
 function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList }) {
   const todayEt = todayInEasternISO();
   const lookback = todayInEasternISO(new Date(Date.now() - (90 * MS_PER_DAY)));
@@ -133,20 +161,38 @@ function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList }) {
   const embeds = [summary];
   if (!includeFullList) return embeds;
 
-  const lines = activeRows.length
-    ? activeRows.map(r => {
-        const trainee = Number(r.rank_id) === 12 ? ' | ENS Trainee' : '';
-        const vatsim = (r.vatsim_cid || 'Unknown').trim();
-        return `• ${r.name || 'Unknown Name'} | vUSCG C${r.pilot_id} | VATSIM ${vatsim}${trainee}`;
-      })
-    : ['• No active pilots found.'];
+  const makeLine = (r) => {
+    const vatsim = (r.vatsim_cid || 'Unknown').trim();
+    return `• ${r.name || 'Unknown Name'} | vUSCG C${r.pilot_id} | VATSIM ${vatsim}`;
+  };
 
-  const pages = chunkLines(lines);
-  pages.forEach((pageLines, idx) => {
+  const trainees = activeRows.filter(r => Number(r.rank_id) === 12);
+  const nonTrainees = activeRows.filter(r => Number(r.rank_id) !== 12);
+
+  const nonTraineeLines = nonTrainees.length
+    ? nonTrainees.map(makeLine)
+    : ['• No non-trainee active pilots found.'];
+
+  const traineeLines = trainees.length
+    ? trainees.map(makeLine)
+    : ['• No active ENS trainees found.'];
+
+  const nonTraineePages = chunkLines(nonTraineeLines);
+  nonTraineePages.forEach((pageLines, idx) => {
     embeds.push(
       new EmbedBuilder()
-        .setTitle(`📋 Full Active List (Monthly) — Page ${idx + 1}/${pages.length}`)
+        .setTitle(`📋 Full Active List (Monthly - Non-Trainees) — Page ${idx + 1}/${nonTraineePages.length}`)
         .setColor(0x2ecc71)
+        .setDescription(pageLines.join('\n'))
+    );
+  });
+
+  const traineePages = chunkLines(traineeLines);
+  traineePages.forEach((pageLines, idx) => {
+    embeds.push(
+      new EmbedBuilder()
+        .setTitle(`🧑‍🎓 Full Active List (Monthly - ENS Trainees) — Page ${idx + 1}/${traineePages.length}`)
+        .setColor(0xf1c40f)
         .setDescription(pageLines.join('\n'))
     );
   });
@@ -187,7 +233,7 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
 
   if (!dryRun) {
     const ch = await client.channels.fetch(channelId);
-    if (ch?.isTextBased()) await ch.send({ embeds });
+    if (ch?.isTextBased()) await sendPaginatedEmbeds(ch, embeds);
     saveCache({ lastPostedDate: todayEt, activePilotIds: activeRows.map(r => Number(r.pilot_id)) });
   }
 
