@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const CACHE_PATH = './activity_90d_cache.json';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -111,6 +111,34 @@ function chunkLines(lines, maxChars = 3800, maxLines = 30) {
   return chunks;
 }
 
+
+async function sendPaginatedEmbeds(channel, embeds) {
+  if (!embeds.length) return;
+  if (embeds.length === 1) {
+    await channel.send({ embeds: [embeds[0]] });
+    return;
+  }
+
+  let page = 0;
+  const buildRow = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('activity90:prev').setLabel('⬅️ Previous').setStyle(ButtonStyle.Primary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId('activity90:next').setLabel('Next ➡️').setStyle(ButtonStyle.Primary).setDisabled(page === embeds.length - 1)
+  );
+
+  const msg = await channel.send({ embeds: [embeds[page]], components: [buildRow()] });
+  const collector = msg.createMessageComponentCollector({ time: 24 * 60 * 60 * 1000 });
+
+  collector.on('collect', async i => {
+    if (i.customId === 'activity90:next' && page < embeds.length - 1) page++;
+    if (i.customId === 'activity90:prev' && page > 0) page--;
+    await i.update({ embeds: [embeds[page]], components: [buildRow()] });
+  });
+
+  collector.on('end', async () => {
+    try { await msg.edit({ components: [] }); } catch {}
+  });
+}
+
 function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList }) {
   const todayEt = todayInEasternISO();
   const lookback = todayInEasternISO(new Date(Date.now() - (90 * MS_PER_DAY)));
@@ -205,7 +233,7 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
 
   if (!dryRun) {
     const ch = await client.channels.fetch(channelId);
-    if (ch?.isTextBased()) await ch.send({ embeds });
+    if (ch?.isTextBased()) await sendPaginatedEmbeds(ch, embeds);
     saveCache({ lastPostedDate: todayEt, activePilotIds: activeRows.map(r => Number(r.pilot_id)) });
   }
 
