@@ -7,4 +7,5 @@ module.exports = {
   moveaircraft: require('./moveaircraft'),
   jumpseat: require('./jumpseat'),
   manualpirep: require('./manualpirep'),
+  activity90: require('./activity90'),
 };
