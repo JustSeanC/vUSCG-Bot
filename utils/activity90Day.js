@@ -159,7 +159,7 @@ function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList, prom
       { name: 'Today', value: todayEt, inline: true },
       { name: 'Window Start', value: lookback, inline: true },
       { name: 'Window End', value: todayEt, inline: true },
-      { name: 'Active Pilots', value: String(activeRows.length), inline: true },
+      { name: 'Active Pilots (Non-Trainee)', value: String(activeRows.length - activeTrainees), inline: true },
       { name: 'Added Since Last Check', value: String(addedRows.length), inline: true },
       { name: 'Removed Since Last Check', value: String(removedRows.length), inline: true },
       { name: 'Active Trainees (ENS)', value: String(activeTrainees), inline: true },
@@ -268,7 +268,7 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
     });
   }
 
-  return { skipped: false, activeCount: activeRows.length, added: addedRows.length, removed: removedRows.length, embeds };
+  return { skipped: false, activeCount: activeRows.length - activeRows.filter(r => Number(r.rank_id) === 12).length, activeTraineeCount: activeRows.filter(r => Number(r.rank_id) === 12).length, added: addedRows.length, removed: removedRows.length, embeds };
 }
 
 function startActivity90DayReporter({ client, db, channelId = '1507352324194959360', pollMs = 5 * 60 * 1000 }) {
