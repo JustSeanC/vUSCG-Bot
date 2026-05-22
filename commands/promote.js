@@ -58,17 +58,20 @@ module.exports = {
 
         if (trainingChannel?.threads) {
           let thread = null;
+          const cidTokenRegex = new RegExp(`(^|[^A-Z0-9])C${pilotId}([^0-9]|$)`, 'i');
+          const threadMatchesCid = (t) => cidTokenRegex.test(String(t?.name || ''));
 
           const activeThreads = await trainingChannel.threads.fetchActive();
-          thread = activeThreads?.threads?.find(t =>
-            (t.name || '').toUpperCase().includes(`C${pilotId}`)
-          ) || null;
+          thread = activeThreads?.threads?.find(threadMatchesCid) || null;
 
           if (!thread) {
-            const archivedThreads = await trainingChannel.threads.fetchArchived({ type: 'private', limit: 100 });
-            thread = archivedThreads?.threads?.find(t =>
-              (t.name || '').toUpperCase().includes(`C${pilotId}`)
-            ) || null;
+            const archivedPrivate = await trainingChannel.threads.fetchArchived({ type: 'private', limit: 100 });
+            thread = archivedPrivate?.threads?.find(threadMatchesCid) || null;
+          }
+
+          if (!thread) {
+            const archivedPublic = await trainingChannel.threads.fetchArchived({ type: 'public', limit: 100 });
+            thread = archivedPublic?.threads?.find(threadMatchesCid) || null;
           }
 
           if (thread) {
