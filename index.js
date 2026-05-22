@@ -9,6 +9,7 @@ const turf = require('@turf/turf');
 const { startPendingPirepWatcher, handlePirepButton } = require('./utils/pendingPireps');
 const flavorTexts = require('./flavorTexts.json');
 const syncRanks = require('./rankSync');
+const { startActivity90DayReporter } = require('./utils/activity90Day');
 
 const commands = require('./commands');
 
@@ -170,6 +171,13 @@ client.once('ready', () => {
     fallbackChannelId: process.env.PENDING_PIREP_FALLBACK_CHANNEL_ID || null,
     pollSeconds: process.env.PIREP_WATCHER_POLL_SECONDS || 60,
   });
+  // Start daily 90-day activity reporting
+  startActivity90DayReporter({
+    client,
+    db,
+    channelId: '1507352324194959360',
+  });
+
   // Run rank sync once on startup
   try {
     syncRanks(client, db, process.env.GUILD_ID);
