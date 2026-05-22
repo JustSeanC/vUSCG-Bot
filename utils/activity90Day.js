@@ -43,18 +43,22 @@ async function fetchActivePilots(db) {
       u.pilot_id,
       u.name,
       u.rank_id,
-      MAX(p.submitted_at) AS last_flight_at,
+      rp.last_flight_at,
       ufv.value AS vatsim_cid
-    FROM users u
-    JOIN pireps p ON p.user_id = u.id
+    FROM (
+      SELECT
+        p.user_id,
+        MAX(p.submitted_at) AS last_flight_at
+      FROM pireps p
+      WHERE p.submitted_at >= (UTC_TIMESTAMP() - INTERVAL 90 DAY)
+      GROUP BY p.user_id
+    ) rp
+    LEFT JOIN users u
+      ON u.id = rp.user_id
     LEFT JOIN user_field_values ufv
       ON ufv.user_id = u.id
      AND ufv.user_field_id = 1
-    WHERE p.submitted_at >= (UTC_TIMESTAMP() - INTERVAL 90 DAY)
-      AND u.state IN (1,3)
-      AND u.pilot_id >= 2000
-    GROUP BY u.id, u.pilot_id, u.name, u.rank_id, ufv.value
-    ORDER BY u.pilot_id ASC
+    ORDER BY rp.last_flight_at DESC, u.pilot_id ASC
   `;
   const [rows] = await db.query(sql);
   return rows || [];
