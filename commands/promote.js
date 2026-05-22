@@ -51,6 +51,46 @@ module.exports = {
       await member.roles.add(roleO2);
       await member.roles.add(track === 'rotary' ? roleRotary : roleFixed);
 
+      // Post confirmation in associated training thread (if found)
+      try {
+        const trainingChannelId = process.env.TRAINING_CHANNEL_ID || '1174748570948223026';
+        const trainingChannel = await interaction.guild.channels.fetch(trainingChannelId);
+
+        if (trainingChannel?.threads) {
+          let thread = null;
+
+          const activeThreads = await trainingChannel.threads.fetchActive();
+          thread = activeThreads?.threads?.find(t =>
+            (t.name || '').toUpperCase().includes(`C${pilotId}`)
+          ) || null;
+
+          if (!thread) {
+            const archivedThreads = await trainingChannel.threads.fetchArchived({ type: 'private', limit: 100 });
+            thread = archivedThreads?.threads?.find(t =>
+              (t.name || '').toUpperCase().includes(`C${pilotId}`)
+            ) || null;
+          }
+
+          if (thread) {
+            try {
+              await thread.setArchived(false, 'Posting promotion confirmation');
+            } catch (e) {
+              console.warn(`⚠️ Could not unarchive training thread for C${pilotId}:`, e?.message ?? e);
+            }
+
+            await thread.send(
+              `✅ **Promotion Update**\n` +
+              `<@${targetUser.id}> has been promoted to **O-2 LTJG** on the **${track === 'rotary' ? 'Rotary Wing' : 'Fixed Wing'}** track.\n` +
+              `vUSCG CID: **C${pilotId}**.`
+            );
+          } else {
+            console.warn(`⚠️ No associated training thread found for C${pilotId}.`);
+          }
+        }
+      } catch (e) {
+        console.warn(`⚠️ Could not post promotion confirmation in training thread for C${pilotId}:`, e?.message ?? e);
+      }
+
       await interaction.editReply({
         content: `✅ Promoted <@${targetUser.id}> to **O-2 LTJG** – ${track === 'rotary' ? 'Rotary Wing' : 'Fixed Wing'}`,
       });
