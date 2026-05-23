@@ -33,7 +33,11 @@ function shouldPostNow(now = new Date()) {
   }).formatToParts(now);
   const hour = Number(et.find(p => p.type === 'hour')?.value ?? 0);
   const minute = Number(et.find(p => p.type === 'minute')?.value ?? 0);
-  return hour === 22 && minute <= 10;
+
+  // Hard posting window: 10:00 PM ET through 11:50 PM ET.
+  if (hour === 22) return true;
+  if (hour === 23 && minute <= 50) return true;
+  return false;
 }
 
 async function fetchActivePilots(db) {
