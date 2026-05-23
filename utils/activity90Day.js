@@ -289,7 +289,13 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
   return { skipped: false, activeCount: activeRows.length - activeRows.filter(r => Number(r.rank_id) === 12).length, activeTraineeCount: activeRows.filter(r => Number(r.rank_id) === 12).length, added: addedRows.length, removed: removedRows.length, embeds };
 }
 
-function startActivity90DayReporter({ client, db, channelId = '1507352324194959360', pollMs = 5 * 60 * 1000 }) {
+function startActivity90DayReporter({
+  client,
+  db,
+  channelId = '1507352324194959360',
+  pollMs = 5 * 60 * 1000,
+  runOnStartup = true,
+}) {
   const tick = async () => {
     try {
       const now = new Date();
@@ -305,6 +311,21 @@ function startActivity90DayReporter({ client, db, channelId = '15073523241949593
       console.warn('⚠️ 90-day activity reporter tick failed:', e?.message ?? e);
     }
   };
+
+  if (runOnStartup) {
+    runActivity90DayReport({ client, db, channelId })
+      .then(result => {
+        if (result?.skipped) {
+          console.log(`ℹ️ [Activity90] Startup check skipped (${result.reason}).`);
+        } else {
+          console.log('✅ [Activity90] Startup check posted daily report.');
+        }
+      })
+      .catch(e => {
+        console.warn('⚠️ [Activity90] Startup check failed:', e?.message ?? e);
+      });
+  }
+
   tick();
   setInterval(tick, pollMs);
 }
