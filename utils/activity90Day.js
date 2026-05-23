@@ -27,6 +27,16 @@ function todayInEasternISO(date = new Date()) {
   return fmt.format(date);
 }
 
+
+function nowEtStamp(now = new Date()) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).format(now);
+}
+
 function shouldPostNow(now = new Date()) {
   const et = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
@@ -36,7 +46,7 @@ function shouldPostNow(now = new Date()) {
 
   // Hard posting window: 10:00 PM ET through 11:50 PM ET.
   if (hour === 22) return true;
-  if (hour === 23 && minute <= 59) return true;
+  if (hour === 23 && minute <= 50) return true;
   return false;
 }
 
@@ -220,7 +230,10 @@ function buildEmbeds({ activeRows, addedRows, removedRows, includeFullList, prom
 async function runActivity90DayReport({ client, db, channelId, force = false, dryRun = false, showFullList = false }) {
   const cache = loadCache();
   const todayEt = todayInEasternISO();
-  if (!force && cache.lastPostedDate === todayEt) return { skipped: true, reason: 'already_posted_today' };
+  if (!force && cache.lastPostedDate === todayEt) {
+    console.log(`ℹ️ [Activity90] Skip post: already posted for ET date ${todayEt}.`);
+    return { skipped: true, reason: 'already_posted_today' };
+  }
 
   const activeRows = await fetchActivePilots(db);
   const oldSet = new Set((cache.activePilotIds || []).map(Number));
@@ -270,19 +283,49 @@ async function runActivity90DayReport({ client, db, channelId, force = false, dr
       activePilotIds: activeRows.map(r => Number(r.pilot_id)),
       activeTraineePilotIds: activeRows.filter(r => Number(r.rank_id) === 12).map(r => Number(r.pilot_id)),
     });
+    console.log(`✅ [Activity90] Posted report for ET date ${todayEt}. Active(non-trainee)=${activeRows.length - activeRows.filter(r => Number(r.rank_id) === 12).length}, Active trainees=${activeRows.filter(r => Number(r.rank_id) === 12).length}, Added=${addedRows.length}, Removed=${removedRows.length}.`);
   }
 
   return { skipped: false, activeCount: activeRows.length - activeRows.filter(r => Number(r.rank_id) === 12).length, activeTraineeCount: activeRows.filter(r => Number(r.rank_id) === 12).length, added: addedRows.length, removed: removedRows.length, embeds };
 }
 
-function startActivity90DayReporter({ client, db, channelId = '1507352324194959360', pollMs = 5 * 60 * 1000 }) {
+function startActivity90DayReporter({
+  client,
+  db,
+  channelId = '1507352324194959360',
+  pollMs = 5 * 60 * 1000,
+  runOnStartup = true,
+}) {
   const tick = async () => {
     try {
-      if (shouldPostNow()) await runActivity90DayReport({ client, db, channelId });
+      const now = new Date();
+      const inWindow = shouldPostNow(now);
+      const todayEt = todayInEasternISO(now);
+      const cache = loadCache();
+      console.log(`🕒 [Activity90] Tick ET=${nowEtStamp(now)} | inWindow=${inWindow} | lastPostedDate=${cache.lastPostedDate ?? 'none'} | todayEt=${todayEt}`);
+
+      if (!inWindow) return;
+
+      await runActivity90DayReport({ client, db, channelId });
     } catch (e) {
       console.warn('⚠️ 90-day activity reporter tick failed:', e?.message ?? e);
     }
   };
+
+  if (runOnStartup) {
+    runActivity90DayReport({ client, db, channelId })
+      .then(result => {
+        if (result?.skipped) {
+          console.log(`ℹ️ [Activity90] Startup check skipped (${result.reason}).`);
+        } else {
+          console.log('✅ [Activity90] Startup check posted daily report.');
+        }
+      })
+      .catch(e => {
+        console.warn('⚠️ [Activity90] Startup check failed:', e?.message ?? e);
+      });
+  }
+
   tick();
   setInterval(tick, pollMs);
 }
