@@ -168,6 +168,17 @@ new SlashCommandBuilder()
     )
     .toJSON(),
 
+
+  new SlashCommandBuilder()
+    .setName('activity90')
+    .setDescription('Force-run the 90-day pilot activity report (Admin only)')
+    .addBooleanOption(option =>
+      option.setName('show_full_list')
+        .setDescription('Include full active pilot roster pages (default: true)')
+        .setRequired(false)
+    )
+    .toJSON(),
+
     new SlashCommandBuilder()
   .setName('forceranksync')
   .setDescription('Force recalculation of all pilot ranks based on hours (Admin only)')
