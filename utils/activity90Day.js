@@ -36,7 +36,7 @@ function shouldPostNow(now = new Date()) {
 
   // Hard posting window: 10:00 PM ET through 11:50 PM ET.
   if (hour === 22) return true;
-  if (hour === 23 && minute <= 50) return true;
+  if (hour === 23 && minute <= 59) return true;
   return false;
 }
 
