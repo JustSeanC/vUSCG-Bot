@@ -65,12 +65,12 @@ module.exports = {
           thread = activeThreads?.threads?.find(threadMatchesCid) || null;
 
           if (!thread) {
-            const archivedPrivate = await trainingChannel.threads.fetchArchived({ type: 'private', limit: 100 });
+            const archivedPrivate = await trainingChannel.threads.fetchArchived({ type: 'private', fetchAll: true });
             thread = archivedPrivate?.threads?.find(threadMatchesCid) || null;
           }
 
           if (!thread) {
-            const archivedPublic = await trainingChannel.threads.fetchArchived({ type: 'public', limit: 100 });
+            const archivedPublic = await trainingChannel.threads.fetchArchived({ type: 'public', fetchAll: true });
             thread = archivedPublic?.threads?.find(threadMatchesCid) || null;
           }
 
