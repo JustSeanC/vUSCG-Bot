@@ -8,4 +8,8 @@ module.exports = {
   jumpseat: require('./jumpseat'),
   manualpirep: require('./manualpirep'),
   activity90: require('./activity90'),
+  myactivity: require('./myactivity'),
+  myairports: require('./myairports'),
+  mycgas: require('./mycgas'),
+  help: require('./help'),
 };

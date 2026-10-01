@@ -39,6 +39,8 @@ const db = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  // phpVMS timestamps and all activity boundary calculations are UTC.
+  timezone: 'Z',
 });
 
 // ---------- Helpers ----------

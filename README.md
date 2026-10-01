@@ -30,8 +30,11 @@ Some commands also check for operational roles on the member:
 
 Many commands need to map a Discord user → phpVMS `pilot_id`.
 
-### 1) Nickname parsing (primary)
-The bot looks for a `C####` pattern in the member’s nickname/display name.
+### 1) Database link (authoritative)
+The bot first looks up the Discord ID in `discord_links`. A nickname can never override an existing link. The linked public `pilot_id` is then resolved separately to `users.id`, which is the value stored by `pireps.user_id`.
+
+### 2) Nickname parsing (unlinked accounts only)
+For older, unlinked members, the bot can fall back to a `C####` pattern in the member’s nickname/display name.
 
 Examples:
 - `C3015 John D` → Pilot ID `3015`
@@ -39,7 +42,7 @@ Examples:
 
 If the bot can’t find `C####`, it will refuse commands that require a pilot identity.
 
-### 2) Database linking (created during `/activate`)
+### Database linking (created during `/activate`)
 During onboarding, `/activate` upserts a record in `discord_links`:
 
 - `discord_id` → `pilot_id`
@@ -48,9 +51,42 @@ This makes identity resolution more reliable for new activations.
 
 > Note: Existing members who were never activated via `/activate` may not be present in `discord_links`. For those members, nickname parsing still works.
 
+Database lookup failures are reported as command failures; they are not treated as an unlinked account.
+
 ---
 
 ## Commands
+
+### `/help` — Anyone
+Shows an ephemeral, role-aware command reference. Regular members do not see staff tools; Instructor Pilots and Command Staff see the tools their actual command permissions allow.
+
+### `/myactivity` — Anyone
+Shows an ephemeral personal activity summary and lifetime statistics. Example: `/myactivity`.
+
+- **90-day activity** uses the latest submitted PIREP in any state, exactly like the existing activity report. It does not use `updated_at` and does not invent an enrollment grace period when there is no history.
+- Times and boundaries are calculated in UTC. The command turns yellow with 10 calendar days or less remaining and red at the precise 90-day instant.
+- The scheduled report's SQL uses an inclusive `submitted_at >= UTC_TIMESTAMP() - INTERVAL 90 DAY` boundary. Therefore a PIREP exactly on that report cutoff remains in its result, while the personal countdown describes the cutoff as reached at that exact instant.
+- **Lifetime statistics** use accepted PIREPs (`state = 2`) only: count, distinct aircraft IDs, flight time (phpVMS minutes, displayed as hours/minutes), distance in nautical miles, and distinct arrival airports.
+- Aircraft registrations are displayed when the current aircraft row still exists. Historic registrations cannot be recovered when that metadata has been deleted, but those PIREPs still count by aircraft ID.
+- Jumpseat changes and administrative aircraft moves do not create PIREPs, so they do not count as flights or visits.
+
+### `/myairports` — Anyone
+Shows a private, paginated list of airports visited through **arrivals on accepted PIREPs**, including arrival count and first/latest recorded visit. Example: `/myairports`. A departure alone is not a visit, and an airport whose metadata was removed is retained under its recorded code.
+
+### `/mycgas` — Anyone
+Shows private CGAS completion progress. An arrival on an accepted PIREP earns credit; departures do not, and aliases for one station never award duplicate station credit. Returning to an airport on another accepted flight remains a valid arrival and updates the latest visit.
+
+#### Configure the CGAS roster
+
+No authoritative station roster was found in this repository, so `config/cgasStations.js` is intentionally empty rather than treating every phpVMS hub as a station. Copy entries from `config/cgasStations.example.js` and replace them with the organization's authoritative list:
+
+```js
+module.exports = [
+  { id: 'stable-station-id', name: 'Air Station Name', airportCodes: ['KABC', 'ABC'] },
+];
+```
+
+Keep each `id` stable through display-name changes. Put all accepted ICAO/code aliases in `airportCodes`; matching is case-insensitive. With an empty array, `/mycgas` and `/myactivity` clearly say that the station list is not configured.
 
 ### `/activate` — Command Staff only
 **Purpose:** Onboard a new member and start their training case.
@@ -230,3 +266,16 @@ On startup (and then every hour), the bot runs rank sync:
 ## Notes
 - This bot assumes phpVMS v7 schema conventions (e.g., `users`, `aircraft`, `airports`, `pireps`).
 - Identity resolution depends on consistent `C####` nicknames and/or `discord_links` created during `/activate`.
+
+## Test and deployment workflow
+
+From the bot checkout, review and deploy the feature branch normally (do not commit `.env`):
+
+```bash
+npm install
+npm test
+node deploy-commands.js
+pm2 restart discordbot
+```
+
+`node deploy-commands.js` registers the new slash commands in the configured guild. The existing production helper performs the same command registration and then uses the existing PM2 process name with `pm2 restart discordbot`. Database migrations are not required. Do not run the deploy script from a development checkout unless it is intended to update the configured Discord guild.
