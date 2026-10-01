@@ -63,6 +63,8 @@ Shows an ephemeral, role-aware command reference. Regular members do not see sta
 ### `/myactivity` — Anyone
 Shows an ephemeral personal activity summary and lifetime statistics. Example: `/myactivity`.
 
+Command Staff and Instructor Pilots may perform a read-only lookup with either `user` or `pilot_id` (never both), for example `/myactivity user:@Pilot`. Ordinary members are restricted to themselves even if they manually submit target options.
+
 - **90-day activity** uses the latest submitted PIREP in any state, exactly like the existing activity report. It does not use `updated_at` and does not invent an enrollment grace period when there is no history.
 - Times and boundaries are calculated in UTC. The command turns yellow with 10 calendar days or less remaining and red at the precise 90-day instant.
 - The scheduled report's SQL uses an inclusive `submitted_at >= UTC_TIMESTAMP() - INTERVAL 90 DAY` boundary. Therefore a PIREP exactly on that report cutoff remains in its result, while the personal countdown describes the cutoff as reached at that exact instant.
@@ -73,20 +75,29 @@ Shows an ephemeral personal activity summary and lifetime statistics. Example: `
 ### `/myairports` — Anyone
 Shows a private, paginated list of airports visited through **arrivals on accepted PIREPs**, including arrival count and first/latest recorded visit. Example: `/myairports`. A departure alone is not a visit, and an airport whose metadata was removed is retained under its recorded code.
 
+Command Staff and Instructor Pilots may use `/myairports user:@Pilot` or `/myairports pilot_id:3015`. A Discord target must have a `discord_links` row; nicknames are never used to infer someone else's identity. Pagination remains controlled by the staff requester.
+
 ### `/mycgas` — Anyone
 Shows private CGAS completion progress. An arrival on an accepted PIREP earns credit; departures do not, and aliases for one station never award duplicate station credit. Returning to an airport on another accepted flight remains a valid arrival and updates the latest visit.
 
+The command displays progress against the current version. Command Staff and Instructor Pilots may use `/mycgas user:@Pilot` or `/mycgas pilot_id:3015`; these lookups only read the shared progress calculation and cannot award or announce completion.
+
 #### Configure the CGAS roster
 
-No authoritative station roster was found in this repository, so `config/cgasStations.js` is intentionally empty rather than treating every phpVMS hub as a station. Copy entries from `config/cgasStations.example.js` and replace them with the organization's authoritative list:
+The authoritative, versioned roster is `config/cgasStations.js`:
 
 ```js
-module.exports = [
-  { id: 'stable-station-id', name: 'Air Station Name', airportCodes: ['KABC', 'ABC'] },
-];
+module.exports = {
+  version: '2026.1',
+  stations: [
+    { id: 'stable-station-id', name: 'Air Station Name', airportCodes: ['KABC', 'ABC'] },
+  ],
+};
 ```
 
-Keep each `id` stable through display-name changes. Put all accepted ICAO/code aliases in `airportCodes`; matching is case-insensitive. With an empty array, `/mycgas` and `/myactivity` clearly say that the station list is not configured.
+Keep each `id` stable through display-name changes. Put all accepted ICAO/code aliases in `airportCodes`; matching is case-insensitive. An empty roster, missing version, duplicate/missing station ID, or station without aliases is invalid and can never award completion.
+
+Station IDs and airport aliases form the requirements snapshot. **Increment `version` deliberately whenever either changes.** The checker stores and compares a SHA-256 hash, and refuses to run with an actionable error if requirements change under the same version. Display-name corrections do not alter the hash or reset progress. Old version records and earned achievements are retained.
 
 ### `/activate` — Command Staff only
 **Purpose:** Onboard a new member and start their training case.
@@ -251,9 +262,37 @@ Keep each `id` stable through display-name changes. Put all accepted ICAO/code a
   - an ephemeral confirmation to the user
   - a flight summary post to a log channel
 
+The old manual-report destination was a hard-coded channel (`1219417084652556348`) and the repository does not establish that channel's human-readable identity. Set `MANUAL_PIREP_CHANNEL_ID` to the confirmed destination. Set `CGAS_TOUR_CHANNEL_ID` separately to the confirmed **Mission Notices** channel; the values may be the same after staff confirms that identity.
+
 ---
 
 ## Background Processes
+
+### CGAS tour completion checker
+
+The checker runs at startup and every `CGAS_TOUR_CHECK_INTERVAL_SECONDS` (default 300 seconds). An in-process guard and a MySQL named lock prevent overlapping runs. It scans every active phpVMS user (`users.state = 1`) in bounded batches and aggregates qualifying arrivals in SQL rather than loading individual PIREPs.
+
+A visit uses the same rule as `/mycgas`: the PIREP belongs to `users.id`, has accepted state `2`, has not been soft-deleted, and arrives at a configured alias. Pending, rejected, and deleted reports do not count. Jumpseats and administrative relocations create no PIREP and therefore do not count. Website, ACARS, and Discord manual PIREPs all qualify once accepted because detection reads phpVMS rather than the submission path.
+
+For every station the checker records the earliest qualifying `submitted_at`, with PIREP ID as a deterministic tie-breaker. Completion is dated at the latest of those first visits and stores that final station and PIREP. If staff approves an old pending report later, detection happens after approval but the completion date remains the historical flight/submission timestamp—not `updated_at` or approval time.
+
+#### Durable state and first-run baseline
+
+Apply `migrations/001_cgas_tour.sql` before starting this feature. The bot-owned tables persist:
+
+- version, immutable station-ID/alias snapshot, requirements hash, and baseline marker;
+- one completion per phpVMS `users.id` and tour version;
+- historical completion/final-stop details and detection time;
+- baseline/announcement state, retry details, and Discord channel/message IDs;
+- optional role state and retries independently of announcement delivery.
+
+On the first **successful** scan of a new version, existing completers are inserted as baselined and are not announced or mass-awarded roles. The marker is committed only after the entire scan succeeds; zero completers is a successful baseline. A scan failure rolls the transaction back. Missing tables fail closed rather than announcing. Do not delete or partially edit these tables: restore durable state from backup if it is corrupt.
+
+After baseline, newly discovered completions get a durable pending job before Discord delivery. Database uniqueness plus atomic claims prevents normal duplicate sends. Definite Discord failures retry with bounded exponential backoff. Before sending, state changes to `sending`; after restart, the checker searches the latest 100 destination messages for its stable completion token. If a network failure or send/ack crash leaves the result ambiguous and reconciliation cannot prove delivery, it records `uncertain` for manual review instead of blindly reposting. Discord and MySQL cannot provide a shared exactly-once transaction, so this deliberately favors avoiding duplicates over claiming perfect exactly-once delivery.
+
+Missing channel access leaves jobs pending and logs an actionable error. `CGAS_TOUR_CHANNEL_ID` is mandatory for delivery. Announcement mentions allow only the linked pilot; unlinked or unavailable members use the sanitized phpVMS display name and public Pilot ID.
+
+Set optional `CGAS_TOUR_ROLE_ID` to award new, linked guild members a completion role. Empty disables it. Role attempts are tracked and retried separately, never block/repost announcements, never remove earned roles, and exclude baseline history. The bot needs **Manage Roles**, and its highest role must be above the completion role.
 
 ### Hourly rank sync
 On startup (and then every hour), the bot runs rank sync:
@@ -274,8 +313,27 @@ From the bot checkout, review and deploy the feature branch normally (do not com
 ```bash
 npm install
 npm test
+mysql -h "$DB_HOST" -u "$DB_USER" -p "$DB_NAME" < migrations/001_cgas_tour.sql
 node deploy-commands.js
 pm2 restart discordbot
 ```
 
-`node deploy-commands.js` registers the new slash commands in the configured guild. The existing production helper performs the same command registration and then uses the existing PM2 process name with `pm2 restart discordbot`. Database migrations are not required. Do not run the deploy script from a development checkout unless it is intended to update the configured Discord guild.
+Deployment checklist:
+
+1. Back up the database and apply `migrations/001_cgas_tour.sql` once.
+2. Confirm `config/cgasStations.js` station IDs, aliases, and version. Change the version if requirements have changed.
+3. Set `CGAS_TOUR_CHANNEL_ID` to the Mission Notices channel ID; set interval and optional role variables shown in `.env-example`.
+4. Confirm the bot can view/send/embed in Mission Notices. For role awards, confirm Manage Roles and hierarchy.
+5. Run the tests, then re-register commands because the three statistics commands have new slash options.
+6. Restart the PM2 process once. Review logs for the successful silent baseline before relying on announcements.
+
+Commands for subsequent code-only deployments remain:
+
+```bash
+npm install
+npm test
+node deploy-commands.js
+pm2 restart discordbot
+```
+
+`node deploy-commands.js` registers the slash commands in the configured guild. The existing production helper performs registration and then uses the existing PM2 process name. Do not run either command from a development checkout unless it is intended to update the configured Discord guild. This change does not run migrations, deploy, restart PM2, or send production announcements automatically.

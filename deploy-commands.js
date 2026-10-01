@@ -2,9 +2,15 @@ const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 require('dotenv').config();
 
 const commands = [
-  new SlashCommandBuilder().setName('myactivity').setDescription('Show your activity status and lifetime statistics').toJSON(),
-  new SlashCommandBuilder().setName('myairports').setDescription('Show airports visited through accepted PIREP arrivals').toJSON(),
-  new SlashCommandBuilder().setName('mycgas').setDescription('Show your Coast Guard air station visit progress').toJSON(),
+  new SlashCommandBuilder().setName('myactivity').setDescription('Show pilot activity status and lifetime statistics')
+    .addUserOption(o => o.setName('user').setDescription('Staff: linked Discord member to view').setRequired(false))
+    .addIntegerOption(o => o.setName('pilot_id').setDescription('Staff: public numeric vUSCG Pilot ID').setRequired(false).setMinValue(1)).toJSON(),
+  new SlashCommandBuilder().setName('myairports').setDescription('Show airports visited through accepted PIREP arrivals')
+    .addUserOption(o => o.setName('user').setDescription('Staff: linked Discord member to view').setRequired(false))
+    .addIntegerOption(o => o.setName('pilot_id').setDescription('Staff: public numeric vUSCG Pilot ID').setRequired(false).setMinValue(1)).toJSON(),
+  new SlashCommandBuilder().setName('mycgas').setDescription('Show Coast Guard air station visit progress')
+    .addUserOption(o => o.setName('user').setDescription('Staff: linked Discord member to view').setRequired(false))
+    .addIntegerOption(o => o.setName('pilot_id').setDescription('Staff: public numeric vUSCG Pilot ID').setRequired(false).setMinValue(1)).toJSON(),
   new SlashCommandBuilder().setName('help').setDescription('Show bot commands available to you').toJSON(),
   new SlashCommandBuilder()
   .setName('activate')
