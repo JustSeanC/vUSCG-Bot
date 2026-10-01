@@ -5,7 +5,7 @@ module.exports = [
   { id: 'borinquen', name: 'CGAS Borinquen', airportCodes: ['TJBQ', 'BQN'] },
   { id: 'cape-cod', name: 'CGAS Cape Cod', airportCodes: ['KFMH', 'FMH'] },
   { id: 'clearwater', name: 'CGAS Clearwater', airportCodes: ['KPIE', 'PIE'] },
-  { id: 'corpus-christi', name: 'CGAS Corpus Christi', airportCodes: ['KNGP', 'NGP'] },
+  { id: 'corpus-christi', name: 'CGAS Corpus Christi', airportCodes: ['KCRP', 'CRP'] },
   { id: 'detroit', name: 'CGAS Detroit', airportCodes: ['KMTC', 'MTC'] },
   { id: 'elizabeth-city', name: 'CGAS Elizabeth City', airportCodes: ['KECG', 'ECG'] },
   { id: 'houston', name: 'CGAS Houston', airportCodes: ['KEFD', 'EFD'] },
