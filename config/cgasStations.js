@@ -19,7 +19,7 @@ module.exports = [
 
   // Airport-level credit at San Diego International.
   // Add your separate CGAS heliport code if phpVMS uses one.
-  { id: 'san-diego', name: 'CGAS San Diego', airportCodes: ['KSAN', 'SAN'] },
+  { id: 'san-diego', name: 'CGAS San Diego', airportCodes: ['KLDR', 'LDR'] },
 
   { id: 'san-francisco', name: 'CGAS San Francisco', airportCodes: ['KSFO', 'SFO'] },
   { id: 'savannah', name: 'CGAS Savannah', airportCodes: ['KSVN', 'SVN'] },
