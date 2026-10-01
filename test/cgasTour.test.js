@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { loadTour, completionFromVisits } = require('../utils/cgas');
 const { resolveCommandPilot } = require('../utils/pilotStats');
 const { baseline, ensureVersion, insertCompletion, queueHistoricalAnnouncements, deliverAnnouncements, awardRoles, tokenFor } = require('../utils/cgasTourChecker');
+const { baseline, ensureVersion, insertCompletion, deliverAnnouncements, awardRoles, tokenFor } = require('../utils/cgasTourChecker');
 const { sendEphemeralPages } = require('../utils/pagination');
 
 const config = stations => loadTour({ version: 'v1', stations });

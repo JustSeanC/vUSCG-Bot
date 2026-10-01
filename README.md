@@ -312,6 +312,7 @@ For every station the checker records the earliest qualifying `submitted_at`, wi
 #### Durable state and first-run baseline
 
 Apply `migrations/001_cgas_tour.sql` before starting this feature. Apply `migrations/002_cgas_historical_announcements.sql` before using the optional one-time historical announcer. The bot-owned tables persist:
+Apply `migrations/001_cgas_tour.sql` before starting this feature. The bot-owned tables persist:
 
 - version, immutable station-ID/alias snapshot, requirements hash, and baseline marker;
 - one completion per phpVMS `users.id` and tour version;
@@ -355,6 +356,7 @@ pm2 restart discordbot
 Deployment checklist:
 
 1. Back up the database and apply `migrations/001_cgas_tour.sql` once. Apply migration 002 as well if the one-time historical announcer will be used.
+1. Back up the database and apply `migrations/001_cgas_tour.sql` once.
 2. Confirm `config/cgasStations.js` station IDs, aliases, and version. Change the version if requirements have changed.
 3. Set `CGAS_TOUR_CHANNEL_ID` to the Mission Notices channel ID; set interval and optional role variables shown in `.env-example`.
 4. Confirm the bot can view/send/embed in Mission Notices. For role awards, confirm Manage Roles and hierarchy.

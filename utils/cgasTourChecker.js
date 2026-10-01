@@ -270,3 +270,4 @@ function startCgasTourChecker(options) {
 
 module.exports = { BATCH_SIZE, tokenFor, fetchPilotVisits, scanEligiblePilots, ensureVersion, insertCompletion, baseline,
   detectNew, queueHistoricalAnnouncements, completionEmbed, reconcileSending, deliverAnnouncements, awardRoles, runChecker, startCgasTourChecker };
+  detectNew, completionEmbed, reconcileSending, deliverAnnouncements, awardRoles, runChecker, startCgasTourChecker };
