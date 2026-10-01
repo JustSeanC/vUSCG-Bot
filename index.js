@@ -10,6 +10,9 @@ const { startPendingPirepWatcher, handlePirepButton } = require('./utils/pending
 const flavorTexts = require('./flavorTexts.json');
 const syncRanks = require('./rankSync');
 const { startActivity90DayReporter } = require('./utils/activity90Day');
+const { loadTour } = require('./utils/cgas');
+const cgasConfig = require('./config/cgasStations');
+const { startCgasTourChecker } = require('./utils/cgasTourChecker');
 
 const commands = require('./commands');
 
@@ -178,6 +181,17 @@ client.once('ready', () => {
     client,
     db,
     channelId: '1507352324194959360',
+  });
+  startCgasTourChecker({
+    client,
+    db,
+    tour: loadTour(cgasConfig),
+    settings: {
+      guildId: process.env.GUILD_ID,
+      channelId: process.env.CGAS_TOUR_CHANNEL_ID,
+      roleId: process.env.CGAS_TOUR_ROLE_ID || null,
+      intervalSeconds: process.env.CGAS_TOUR_CHECK_INTERVAL_SECONDS || 300,
+    },
   });
 
   // Run rank sync once on startup

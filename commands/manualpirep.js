@@ -252,7 +252,9 @@ await db.query(
       }
 
 // 6) Post flight info to log channel
-const logChannelId = '1219417084652556348';
+// Keep the existing default for compatibility. Configure MANUAL_PIREP_CHANNEL_ID explicitly;
+// CGAS_TOUR_CHANNEL_ID is separate unless staff confirms both notices belong together.
+const logChannelId = process.env.MANUAL_PIREP_CHANNEL_ID || '1219417084652556348';
 
 try {
   const ch = await client.channels.fetch(logChannelId);
