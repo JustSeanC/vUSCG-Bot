@@ -1,7 +1,7 @@
 module.exports = {
-  myactivity: { category: 'Personal Activity', description: 'Show your 90-day activity and accepted-flight statistics.', usage: '/myactivity', access: 'member' },
-  myairports: { category: 'Personal Activity', description: 'List airports you have visited by accepted PIREP arrival.', usage: '/myairports', access: 'member' },
-  mycgas: { category: 'Personal Activity', description: 'Show your progress through configured Coast Guard air stations.', usage: '/mycgas', access: 'member' },
+  myactivity: { category: 'Personal Activity', description: 'Show your 90-day activity and accepted-flight statistics. Staff may target another pilot.', usage: '/myactivity', access: 'member' },
+  myairports: { category: 'Personal Activity', description: 'List airports visited by accepted PIREP arrival. Staff may target another pilot.', usage: '/myairports', access: 'member' },
+  mycgas: { category: 'Personal Activity', description: 'Show progress through the current Coast Guard air-station tour. Staff may target another pilot.', usage: '/mycgas', access: 'member' },
   help: { category: 'Personal Activity', description: 'Show commands available to you.', usage: '/help', access: 'member' },
   location: { category: 'Flight Operations', description: 'Find aircraft by registration, type, or airport.', usage: '/location search:C6052', access: 'member' },
   mission: { category: 'Flight Operations', description: 'Generate a mission and available aircraft.', usage: '/mission type:SAR aircraft:H60', access: 'member' },
