@@ -127,8 +127,11 @@ The normal first scan intentionally records historical completers silently. To a
 3. From the deployed bot directory, run the explicit, version-pinned command (replace the example version if needed):
 
    ```bash
+   npm run check
    npm run cgas:announce-baseline -- 2026.1 --confirm
    ```
+
+   Do not copy only the migration or CLI script onto an older checkout: the command also requires the matching `queueHistoricalAnnouncements` export in `utils/cgasTourChecker.js`. `npm run check` must succeed first. A syntax error here means the deployed JavaScript is incomplete or was edited during deployment; replace it from the same commit rather than trying to repair the production file by hand.
 
 The command does not send directly. In one database transaction it changes only that version's `baselined=1`/`announcement_status='none'` records into durable pending jobs and records a permanent timestamp and count on the version row. The running five-minute checker then sends them using the normal delivery safeguards. Re-running the command, running it concurrently, or restarting after it succeeds cannot queue that historical group again. A failed transaction leaves the one-time marker unset so it can be safely retried. Empty historical groups are also marked as successfully queued once. This campaign does not mass-award the optional role.
 
@@ -312,7 +315,6 @@ For every station the checker records the earliest qualifying `submitted_at`, wi
 #### Durable state and first-run baseline
 
 Apply `migrations/001_cgas_tour.sql` before starting this feature. Apply `migrations/002_cgas_historical_announcements.sql` before using the optional one-time historical announcer. The bot-owned tables persist:
-Apply `migrations/001_cgas_tour.sql` before starting this feature. The bot-owned tables persist:
 
 - version, immutable station-ID/alias snapshot, requirements hash, and baseline marker;
 - one completion per phpVMS `users.id` and tour version;
@@ -356,7 +358,6 @@ pm2 restart discordbot
 Deployment checklist:
 
 1. Back up the database and apply `migrations/001_cgas_tour.sql` once. Apply migration 002 as well if the one-time historical announcer will be used.
-1. Back up the database and apply `migrations/001_cgas_tour.sql` once.
 2. Confirm `config/cgasStations.js` station IDs, aliases, and version. Change the version if requirements have changed.
 3. Set `CGAS_TOUR_CHANNEL_ID` to the Mission Notices channel ID; set interval and optional role variables shown in `.env-example`.
 4. Confirm the bot can view/send/embed in Mission Notices. For role awards, confirm Manage Roles and hierarchy.

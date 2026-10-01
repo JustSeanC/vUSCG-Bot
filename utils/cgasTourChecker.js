@@ -268,6 +268,20 @@ function startCgasTourChecker(options) {
   return { tick, stop: () => clearInterval(timer) };
 }
 
-module.exports = { BATCH_SIZE, tokenFor, fetchPilotVisits, scanEligiblePilots, ensureVersion, insertCompletion, baseline,
-  detectNew, queueHistoricalAnnouncements, completionEmbed, reconcileSending, deliverAnnouncements, awardRoles, runChecker, startCgasTourChecker };
-  detectNew, completionEmbed, reconcileSending, deliverAnnouncements, awardRoles, runChecker, startCgasTourChecker };
+module.exports = {
+  BATCH_SIZE,
+  tokenFor,
+  fetchPilotVisits,
+  scanEligiblePilots,
+  ensureVersion,
+  insertCompletion,
+  baseline,
+  detectNew,
+  queueHistoricalAnnouncements,
+  completionEmbed,
+  reconcileSending,
+  deliverAnnouncements,
+  awardRoles,
+  runChecker,
+  startCgasTourChecker,
+};
