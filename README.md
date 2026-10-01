@@ -65,6 +65,16 @@ Shows an ephemeral personal activity summary and lifetime statistics. Example: `
 
 Command Staff and Instructor Pilots may perform a read-only lookup with either `user` or `pilot_id` (never both), for example `/myactivity user:@Pilot`. Ordinary members are restricted to themselves even if they manually submit target options.
 
+#### Staff pilot lookups
+
+The staff lookup is not a background checker: it is the same `/myactivity`, `/myairports`, or `/mycgas` command with an optional target. At execution time the bot checks the requester's Discord roles against `COMMAND_STAFF_ROLE_ID` and `INSTRUCTOR_PILOT_ROLE_ID`; having either role permits a lookup. Examples:
+
+- `/myactivity user:@Pilot` resolves the selected member only through `discord_links`.
+- `/myairports pilot_id:3015` resolves public Pilot ID `3015` through `users.pilot_id`.
+- `/mycgas user:@Pilot` shows that pilot's progress against the current tour version.
+
+Use exactly one target option. With no target the commands retain their normal self-service behavior. Responses are ephemeral, read-only, prominently identify the selected pilot, and pagination buttons belong to the staff requester. The `user` form requires the selected member to be linked; use `pilot_id` for an unlinked member. Ordinary members cannot bypass the role check by manually supplying an option. Set both staff role IDs in `.env` and run `node deploy-commands.js` after installing or changing the slash-command definitions.
+
 - **90-day activity** uses the latest submitted PIREP in any state, exactly like the existing activity report. It does not use `updated_at` and does not invent an enrollment grace period when there is no history.
 - Times and boundaries are calculated in UTC. The command turns yellow with 10 calendar days or less remaining and red at the precise 90-day instant.
 - The scheduled report's SQL uses an inclusive `submitted_at >= UTC_TIMESTAMP() - INTERVAL 90 DAY` boundary. Therefore a PIREP exactly on that report cutoff remains in its result, while the personal countdown describes the cutoff as reached at that exact instant.
@@ -98,6 +108,29 @@ module.exports = {
 Keep each `id` stable through display-name changes. Put all accepted ICAO/code aliases in `airportCodes`; matching is case-insensitive. An empty roster, missing version, duplicate/missing station ID, or station without aliases is invalid and can never award completion.
 
 Station IDs and airport aliases form the requirements snapshot. **Increment `version` deliberately whenever either changes.** The checker stores and compares a SHA-256 hash, and refuses to run with an actionable error if requirements change under the same version. Display-name corrections do not alter the hash or reset progress. Old version records and earned achievements are retained.
+
+Roster maintenance rules:
+
+- **Correct only a displayed station name:** edit `name` and keep both `id` and `version` unchanged.
+- **Correct/add/remove an ICAO or other qualifying alias:** edit `airportCodes` and increment `version` (for example, `2026.1` to `2026.2`).
+- **Add or delete a station:** edit the `stations` array and increment `version`.
+- Keep an existing station's `id` stable unless it is truly a different requirement. IDs must be unique and aliases should be uppercase for readability (matching itself is case-insensitive).
+
+A new version gets its own silent baseline on the first successful scan; achievements from older versions remain stored. Commit and deploy the configuration change, restart the bot, and confirm the new row in `bot_cgas_tour_versions` reaches `baseline_status='complete'`. Never edit the saved `roster_json` or requirement hash to bypass a mismatch.
+
+#### Optional one-time announcement of baseline completers
+
+The normal first scan intentionally records historical completers silently. To announce that already-baselined group exactly once for the current version:
+
+1. Apply `migrations/002_cgas_historical_announcements.sql` to the same database as migration 001.
+2. Confirm `CGAS_TOUR_CHANNEL_ID`, allow the bot to finish the baseline, and note the current version in `config/cgasStations.js`.
+3. From the deployed bot directory, run the explicit, version-pinned command (replace the example version if needed):
+
+   ```bash
+   npm run cgas:announce-baseline -- 2026.1 --confirm
+   ```
+
+The command does not send directly. In one database transaction it changes only that version's `baselined=1`/`announcement_status='none'` records into durable pending jobs and records a permanent timestamp and count on the version row. The running five-minute checker then sends them using the normal delivery safeguards. Re-running the command, running it concurrently, or restarting after it succeeds cannot queue that historical group again. A failed transaction leaves the one-time marker unset so it can be safely retried. Empty historical groups are also marked as successfully queued once. This campaign does not mass-award the optional role.
 
 ### `/activate` — Command Staff only
 **Purpose:** Onboard a new member and start their training case.
@@ -278,6 +311,7 @@ For every station the checker records the earliest qualifying `submitted_at`, wi
 
 #### Durable state and first-run baseline
 
+Apply `migrations/001_cgas_tour.sql` before starting this feature. Apply `migrations/002_cgas_historical_announcements.sql` before using the optional one-time historical announcer. The bot-owned tables persist:
 Apply `migrations/001_cgas_tour.sql` before starting this feature. The bot-owned tables persist:
 
 - version, immutable station-ID/alias snapshot, requirements hash, and baseline marker;
@@ -314,12 +348,14 @@ From the bot checkout, review and deploy the feature branch normally (do not com
 npm install
 npm test
 mysql -h "$DB_HOST" -u "$DB_USER" -p "$DB_NAME" < migrations/001_cgas_tour.sql
+mysql -h "$DB_HOST" -u "$DB_USER" -p "$DB_NAME" < migrations/002_cgas_historical_announcements.sql
 node deploy-commands.js
 pm2 restart discordbot
 ```
 
 Deployment checklist:
 
+1. Back up the database and apply `migrations/001_cgas_tour.sql` once. Apply migration 002 as well if the one-time historical announcer will be used.
 1. Back up the database and apply `migrations/001_cgas_tour.sql` once.
 2. Confirm `config/cgasStations.js` station IDs, aliases, and version. Change the version if requirements have changed.
 3. Set `CGAS_TOUR_CHANNEL_ID` to the Mission Notices channel ID; set interval and optional role variables shown in `.env-example`.

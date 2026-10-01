@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadTour, completionFromVisits } = require('../utils/cgas');
 const { resolveCommandPilot } = require('../utils/pilotStats');
+const { baseline, ensureVersion, insertCompletion, queueHistoricalAnnouncements, deliverAnnouncements, awardRoles, tokenFor } = require('../utils/cgasTourChecker');
 const { baseline, ensureVersion, insertCompletion, deliverAnnouncements, awardRoles, tokenFor } = require('../utils/cgasTourChecker');
 const { sendEphemeralPages } = require('../utils/pagination');
 
@@ -156,4 +157,47 @@ test('pending PIREPs only qualify after state changes because qualifying queries
   await fetchPilotVisits({ query: async (query, params) => { sql = query; assert.equal(params[2], 2); return [[]]; } }, [1, 2], ['KAAA']);
   assert.match(sql, /p\.state = \?/);
   assert.match(sql, /p\.deleted_at IS NULL/);
+});
+
+test('historical announcements are queued transactionally once, including an empty campaign', async () => {
+  for (const affectedRows of [3, 0]) {
+    const events = [];
+    const db = {
+      beginTransaction: async () => events.push('begin'), commit: async () => events.push('commit'), rollback: async () => events.push('rollback'),
+      query: async (sql, params) => {
+        if (sql.includes('SELECT requirement_hash')) return [[{ requirement_hash: config(stations).requirementHash, baseline_status: 'complete', historical_announcement_queued_at: null }]];
+        if (sql.includes('UPDATE bot_cgas_completions')) { assert.deepEqual(params, ['v1']); return [{ affectedRows }]; }
+        if (sql.includes('UPDATE bot_cgas_tour_versions')) { assert.deepEqual(params, [affectedRows, 'v1']); return [{ affectedRows: 1 }]; }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    assert.deepEqual(await queueHistoricalAnnouncements(db, config(stations)), { alreadyQueued: false, queued: affectedRows });
+    assert.deepEqual(events, ['begin', 'commit']);
+  }
+});
+
+test('a completed historical campaign cannot be queued again', async () => {
+  const events = [];
+  const db = {
+    beginTransaction: async () => events.push('begin'), commit: async () => events.push('commit'), rollback: async () => events.push('rollback'),
+    query: async sql => {
+      assert.match(sql, /FOR UPDATE/);
+      return [[{ requirement_hash: config(stations).requirementHash, baseline_status: 'complete', historical_announcement_queued_at: '2026-10-01' }]];
+    },
+  };
+  assert.deepEqual(await queueHistoricalAnnouncements(db, config(stations)), { alreadyQueued: true, queued: 0 });
+  assert.deepEqual(events, ['begin', 'rollback']);
+});
+
+test('a failed historical campaign rolls back and remains retryable', async () => {
+  const events = [];
+  const db = {
+    beginTransaction: async () => events.push('begin'), commit: async () => events.push('commit'), rollback: async () => events.push('rollback'),
+    query: async sql => {
+      if (sql.includes('SELECT requirement_hash')) return [[{ requirement_hash: config(stations).requirementHash, baseline_status: 'complete', historical_announcement_queued_at: null }]];
+      throw new Error('write failed');
+    },
+  };
+  await assert.rejects(() => queueHistoricalAnnouncements(db, config(stations)), /write failed/);
+  assert.deepEqual(events, ['begin', 'rollback']);
 });

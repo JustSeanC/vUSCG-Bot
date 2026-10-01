@@ -100,6 +100,39 @@ async function detectNew(db, tour, roleEnabled) {
   return added;
 }
 
+// Deliberately converts the silent baseline into durable announcement jobs once.
+// The version row is locked and the marker is committed with the jobs, so a
+// failed or concurrent invocation cannot partially queue (or queue twice).
+async function queueHistoricalAnnouncements(db, tour) {
+  await db.beginTransaction();
+  try {
+    const [rows] = await db.query(`SELECT requirement_hash, baseline_status,
+      historical_announcement_queued_at FROM bot_cgas_tour_versions WHERE version = ? FOR UPDATE`, [tour.version]);
+    const version = rows[0];
+    if (!version) throw new Error(`CGAS tour ${tour.version} has not been baselined yet.`);
+    if (version.requirement_hash !== tour.requirementHash) {
+      throw new Error(`CGAS tour ${tour.version} requirements do not match the saved roster.`);
+    }
+    if (version.baseline_status !== 'complete') throw new Error(`CGAS tour ${tour.version} baseline is not complete.`);
+    if (version.historical_announcement_queued_at) {
+      await db.rollback();
+      return { alreadyQueued: true, queued: 0 };
+    }
+    const [result] = await db.query(`UPDATE bot_cgas_completions
+      SET announcement_status='pending', announcement_next_attempt_at=NULL, announcement_last_error=NULL
+      WHERE tour_version=? AND baselined=1 AND announcement_status='none'`, [tour.version]);
+    const queued = Number(result.affectedRows || 0);
+    await db.query(`UPDATE bot_cgas_tour_versions
+      SET historical_announcement_queued_at=UTC_TIMESTAMP(), historical_announcement_count=?
+      WHERE version=?`, [queued, tour.version]);
+    await db.commit();
+    return { alreadyQueued: false, queued };
+  } catch (error) {
+    await db.rollback();
+    throw error;
+  }
+}
+
 async function resolveRecipient(db, client, guildId, userId) {
   const [[pilot], [links]] = await Promise.all([
     db.query('SELECT pilot_id, name FROM users WHERE id = ? LIMIT 1', [userId]),
@@ -236,4 +269,5 @@ function startCgasTourChecker(options) {
 }
 
 module.exports = { BATCH_SIZE, tokenFor, fetchPilotVisits, scanEligiblePilots, ensureVersion, insertCompletion, baseline,
+  detectNew, queueHistoricalAnnouncements, completionEmbed, reconcileSending, deliverAnnouncements, awardRoles, runChecker, startCgasTourChecker };
   detectNew, completionEmbed, reconcileSending, deliverAnnouncements, awardRoles, runChecker, startCgasTourChecker };

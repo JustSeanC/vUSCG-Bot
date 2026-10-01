@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "cgas:announce-baseline": "node scripts/queue-cgas-historical-announcements.js"
   },
   "keywords": [],
   "author": "",
