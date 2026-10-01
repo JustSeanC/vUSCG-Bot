@@ -2,6 +2,10 @@ const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 require('dotenv').config();
 
 const commands = [
+  new SlashCommandBuilder().setName('myactivity').setDescription('Show your activity status and lifetime statistics').toJSON(),
+  new SlashCommandBuilder().setName('myairports').setDescription('Show airports visited through accepted PIREP arrivals').toJSON(),
+  new SlashCommandBuilder().setName('mycgas').setDescription('Show your Coast Guard air station visit progress').toJSON(),
+  new SlashCommandBuilder().setName('help').setDescription('Show bot commands available to you').toJSON(),
   new SlashCommandBuilder()
   .setName('activate')
   .setDescription('Activate a user and open a training thread')
