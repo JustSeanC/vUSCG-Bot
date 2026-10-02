@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "check": "find . -path './node_modules' -prune -o -name '*.js' -type f -print0 | xargs -0 -n1 node --check",
+    "cgas:announce-baseline": "node scripts/queue-cgas-historical-announcements.js"
   },
   "keywords": [],
   "author": "",
