@@ -190,6 +190,7 @@ client.once('ready', () => {
       guildId: process.env.GUILD_ID,
       channelId: process.env.CGAS_TOUR_CHANNEL_ID,
       roleId: process.env.CGAS_TOUR_ROLE_ID || null,
+      awardId: process.env.CGAS_TOUR_AWARD_ID || null,
       intervalSeconds: process.env.CGAS_TOUR_CHECK_INTERVAL_SECONDS || 300,
     },
   });

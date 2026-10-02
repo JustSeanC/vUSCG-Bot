@@ -11,6 +11,7 @@ const commands = [
   new SlashCommandBuilder().setName('mycgas').setDescription('Show Coast Guard air station visit progress')
     .addUserOption(o => o.setName('user').setDescription('Staff: linked Discord member to view').setRequired(false))
     .addIntegerOption(o => o.setName('pilot_id').setDescription('Staff: public numeric vUSCG Pilot ID').setRequired(false).setMinValue(1)).toJSON(),
+  new SlashCommandBuilder().setName('cgasleaderboard').setDescription('Staff: rank active pilots by CGAS tour progress').toJSON(),
   new SlashCommandBuilder().setName('help').setDescription('Show bot commands available to you').toJSON(),
   new SlashCommandBuilder()
   .setName('activate')

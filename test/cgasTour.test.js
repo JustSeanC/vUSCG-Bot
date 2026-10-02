@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const { loadTour, completionFromVisits } = require('../utils/cgas');
 const { resolveCommandPilot } = require('../utils/pilotStats');
 const { baseline, ensureVersion, insertCompletion, queueHistoricalAnnouncements, deliverAnnouncements, awardRoles, tokenFor,
-  abbreviatedPilotName, reconciliationMarker, completionEmbed } = require('../utils/cgasTourChecker');
+  abbreviatedPilotName, completionEmbed, awardPhpVmsAwards } = require('../utils/cgasTourChecker');
+const { fetchCgasLeaderboard } = require('../commands/cgasleaderboard');
 const { sendEphemeralPages } = require('../utils/pagination');
 
 const config = stations => loadTour({ version: 'v1', stations });
@@ -40,27 +41,52 @@ test('requirement hash ignores names but detects aliases and a new version has a
   assert.notEqual(tokenFor('v1', 1), tokenFor('v2', 1));
 });
 
-test('completion announcements abbreviate pilot names and hide reconciliation tokens', () => {
+test('completion announcements abbreviate pilot names and contain no reconciliation token', () => {
   assert.equal(abbreviatedPilotName('Jane Coast Guard'), 'Jane G.');
   assert.equal(abbreviatedPilotName('@everyone Smith'), 'everyone S.');
   assert.equal(abbreviatedPilotName('Cher'), 'Cher');
 
   const token = tokenFor('v1', 7);
-  const marker = reconciliationMarker(token);
   const embed = completionEmbed({
     completed_at: '2026-01-02', final_station_name: 'CGAS B', announcement_token: token,
   }, { user: { name: 'Jane Coast Guard', pilot_id: 42 } }, 2).toJSON();
 
   assert.match(embed.description, /Jane G\. \(C42\)/);
   assert.equal(embed.footer.text.startsWith("Think you're getting close? Check your progress with /mycgas!"), true);
-  assert.equal(embed.footer.text.endsWith(marker), true);
-  assert.doesNotMatch(embed.footer.text, /CGAS-|[a-f0-9]{64}/);
+  assert.equal(embed.footer.text, "Think you're getting close? Check your progress with /mycgas!");
 
   const linkedEmbed = completionEmbed({
     completed_at: '2026-01-02', final_station_name: 'CGAS B', announcement_token: token,
   }, { user: { name: 'Jane Coast Guard', pilot_id: 42 }, discordId: '99', member: {} }, 2).toJSON();
   assert.match(linkedEmbed.description, /Jane G\. \(C42\)/);
   assert.doesNotMatch(linkedEmbed.description, /<@99>|Coast Guard/);
+});
+
+test('phpVMS award grant is idempotent and tracked separately', async () => {
+  const queries = [];
+  const db = { query: async (sql, params) => {
+    queries.push([sql, params]);
+    if (sql.includes('SHOW TABLES')) return params[0] === 'user_awards' ? [[{ Tables_in_test: 'user_awards' }]] : [[]];
+    if (sql.includes('SELECT id, user_id')) return [[{ id: 3, user_id: 7, award_attempts: 0 }]];
+    if (sql.includes('SELECT id FROM awards')) return [[{ id: 16 }]];
+    return [{ affectedRows: 1 }];
+  }};
+  await awardPhpVmsAwards(db, { awardId: '16' });
+  assert.ok(queries.some(([sql, params]) => sql.includes('INSERT IGNORE INTO user_awards') && params[0] === 16 && params[1] === 7));
+  assert.ok(queries.some(([sql]) => sql.includes("award_status='awarded'")));
+});
+
+test('CGAS leaderboard orders pilots by distinct station progress', async () => {
+  let call = 0;
+  const db = { query: async () => ++call === 1 ? [[
+    { id: 1, pilot_id: 2, name: 'Behind Pilot' }, { id: 2, pilot_id: 1, name: 'Leading Pilot' },
+  ]] : [[
+    { user_id: 1, code: 'KAAA', first_visit: '2026-01-01' },
+    { user_id: 2, code: 'AAA', first_visit: '2026-01-01' },
+    { user_id: 2, code: 'KBBB', first_visit: '2026-01-02' },
+  ]] };
+  const rows = await fetchCgasLeaderboard(db, config(stations));
+  assert.deepEqual(rows.map(row => [row.pilot_id, row.visited]), [[1, 2], [2, 1]]);
 });
 
 test('persisted requirements changed under the same version fail with an actionable error', async () => {

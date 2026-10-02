@@ -324,11 +324,17 @@ Apply `migrations/001_cgas_tour.sql` before starting this feature. Apply `migrat
 
 On the first **successful** scan of a new version, existing completers are inserted as baselined and are not announced or mass-awarded roles. The marker is committed only after the entire scan succeeds; zero completers is a successful baseline. A scan failure rolls the transaction back. Missing tables fail closed rather than announcing. Do not delete or partially edit these tables: restore durable state from backup if it is corrupt.
 
-After baseline, newly discovered completions get a durable pending job before Discord delivery. Database uniqueness plus atomic claims prevents normal duplicate sends. Definite Discord failures retry with bounded exponential backoff. Before sending, state changes to `sending`; after restart, the checker searches the latest 100 destination messages for its stable completion token. If a network failure or send/ack crash leaves the result ambiguous and reconciliation cannot prove delivery, it records `uncertain` for manual review instead of blindly reposting. Discord and MySQL cannot provide a shared exactly-once transaction, so this deliberately favors avoiding duplicates over claiming perfect exactly-once delivery.
+After baseline, newly discovered completions get a durable pending job before Discord delivery. Database uniqueness plus atomic claims prevents normal duplicate sends. Definite Discord failures retry with bounded exponential backoff. Before sending, state changes to `sending`; after restart, the checker searches the latest 100 destination messages for the persisted pilot ID, final stop, and completion date. If a network failure or send/ack crash leaves the result ambiguous and reconciliation cannot prove delivery, it records `uncertain` for manual review instead of blindly reposting. Discord and MySQL cannot provide a shared exactly-once transaction, so this deliberately favors avoiding duplicates over claiming perfect exactly-once delivery.
 
 Missing channel access leaves jobs pending and logs an actionable error. `CGAS_TOUR_CHANNEL_ID` is mandatory for delivery. Announcement mentions allow only the linked pilot; unlinked or unavailable members use the sanitized phpVMS display name and public Pilot ID.
 
 Set optional `CGAS_TOUR_ROLE_ID` to award new, linked guild members a completion role. Empty disables it. Role attempts are tracked and retried separately, never block/repost announcements, never remove earned roles, and exclude baseline history. The bot needs **Manage Roles**, and its highest role must be above the completion role.
+
+Set `CGAS_TOUR_AWARD_ID=16` to grant the phpVMS **CGAS Grand Tour** award shown at `/admin/awards/16/`. First apply `migrations/003_cgas_phpvms_awards.sql`. Award delivery is idempotent (`INSERT IGNORE` into the detected phpVMS `user_awards` or `award_user` pivot), retried and tracked separately from Discord delivery. Existing stored completions are intentionally queued by migration 003 so previously earned tours appear on the website too. Confirm that award 16 exists in the same phpVMS database before enabling it; leave the setting empty to disable website grants.
+
+The public completion embed uses the pilot's first name and last initial (plus public Pilot ID), not a Discord mention or full surname. Its footer contains only the `/mycgas` prompt; reconciliation compares the persisted pilot ID, final stop, and completion date instead of displaying an internal identifier.
+
+Command Staff and Instructor Pilots can run the ephemeral `/cgasleaderboard` command. It lists every active pilot, ordered from most current-tour stations visited to least, marks completed tours with 🏆, paginates ten pilots at a time, and restricts buttons to the staff requester. It is read-only and does not grant awards or trigger announcements.
 
 ### Hourly rank sync
 On startup (and then every hour), the bot runs rank sync:
@@ -351,17 +357,18 @@ npm install
 npm test
 mysql -h "$DB_HOST" -u "$DB_USER" -p "$DB_NAME" < migrations/001_cgas_tour.sql
 mysql -h "$DB_HOST" -u "$DB_USER" -p "$DB_NAME" < migrations/002_cgas_historical_announcements.sql
+mysql -h "$DB_HOST" -u "$DB_USER" -p "$DB_NAME" < migrations/003_cgas_phpvms_awards.sql
 node deploy-commands.js
 pm2 restart discordbot
 ```
 
 Deployment checklist:
 
-1. Back up the database and apply `migrations/001_cgas_tour.sql` once. Apply migration 002 as well if the one-time historical announcer will be used.
+1. Back up the database and apply migrations 001 and 003 once. Apply migration 002 as well if the one-time historical announcer will be used.
 2. Confirm `config/cgasStations.js` station IDs, aliases, and version. Change the version if requirements have changed.
-3. Set `CGAS_TOUR_CHANNEL_ID` to the Mission Notices channel ID; set interval and optional role variables shown in `.env-example`.
+3. Set `CGAS_TOUR_CHANNEL_ID` to Mission Notices, optionally set the Discord role, and set `CGAS_TOUR_AWARD_ID=16` after confirming the CGAS Grand Tour award ID.
 4. Confirm the bot can view/send/embed in Mission Notices. For role awards, confirm Manage Roles and hierarchy.
-5. Run the tests, then re-register commands because the three statistics commands have new slash options.
+5. Run the tests, then re-register commands because the statistics options and `/cgasleaderboard` must be published.
 6. Restart the PM2 process once. Review logs for the successful silent baseline before relying on announcements.
 
 Commands for subsequent code-only deployments remain:

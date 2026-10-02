@@ -11,15 +11,6 @@ const tokenFor = (version, userId) => crypto.createHash('sha256').update(`${vers
 const sqlDate = value => new Date(value).toISOString().slice(0, 19).replace('T', ' ');
 const waitMinutes = attempts => Math.min(60, 2 ** Math.max(0, attempts));
 
-// Discord does not provide an idempotency key for message sends. Keep the
-// reconciliation fingerprint in the footer, but encode it with zero-width
-// characters so pilots only see the useful call to action.
-const RECONCILIATION_PREFIX = '\u2063\u2063';
-const reconciliationMarker = token => RECONCILIATION_PREFIX + [...String(token)]
-  .flatMap(character => Number.parseInt(character, 16).toString(2).padStart(4, '0'))
-  .map(bit => bit === '0' ? '\u200b' : '\u200c')
-  .join('');
-
 function abbreviatedPilotName(name) {
   const safe = String(name || 'Pilot').replace(/[@`*_~|>]/g, '').trim().replace(/\s+/g, ' ');
   const parts = safe.split(' ').filter(Boolean);
@@ -177,12 +168,22 @@ function completionEmbed(job, recipient, stationCount) {
       { name: '📍 Final stop', value: String(job.final_station_name).slice(0, 1024), inline: true },
       { name: '🚁 Stations visited', value: `${stationCount}/${stationCount}`, inline: true },
       { name: '📅 Completed', value: `<t:${timestamp}:d>`, inline: true },
-    ).setFooter({ text: `Think you're getting close? Check your progress with /mycgas!${reconciliationMarker(job.announcement_token)}` });
+    ).setFooter({ text: "Think you're getting close? Check your progress with /mycgas!" });
+}
+
+function announcementMatches(message, job) {
+  const embed = message.embeds?.[0];
+  if (!embed || embed.title !== '🏆 CGAS Tour Complete!') return false;
+  const completed = Math.floor(new Date(job.completed_at).getTime() / 1000);
+  return embed.fields?.some(field => field.name === '📍 Final stop' && field.value === String(job.final_station_name).slice(0, 1024))
+    && embed.fields?.some(field => field.name === '📅 Completed' && field.value === `<t:${completed}:d>`)
+    && embed.description?.includes(`(C${job.pilot_id})`);
 }
 
 async function reconcileSending(db, channel) {
-  const [jobs] = await db.query(`SELECT id, announcement_token FROM bot_cgas_completions
-    WHERE announcement_status = 'sending' LIMIT 25`);
+  const [jobs] = await db.query(`SELECT c.id, c.completed_at, c.final_station_name, u.pilot_id
+    FROM bot_cgas_completions c JOIN users u ON u.id=c.user_id
+    WHERE c.announcement_status = 'sending' LIMIT 25`);
   if (!jobs.length) return;
   let messages;
   try { messages = await channel.messages.fetch({ limit: 100 }); }
@@ -192,8 +193,7 @@ async function reconcileSending(db, channel) {
     return;
   }
   for (const job of jobs) {
-    const marker = reconciliationMarker(job.announcement_token);
-    const found = messages.find(m => m.embeds?.some(e => e.footer?.text?.includes(marker)));
+    const found = messages.find(message => announcementMatches(message, job));
     if (found) await db.query(`UPDATE bot_cgas_completions SET announcement_status='sent', announcement_message_id=?,
       announcement_channel_id=?, announcement_last_error=NULL WHERE id=? AND announcement_status='sending'`,
       [found.id, found.channelId, job.id]);
@@ -254,6 +254,44 @@ async function awardRoles(db, client, settings) {
   }
 }
 
+async function awardPhpVmsAwards(db, settings) {
+  if (!settings.awardId) return;
+  const awardId = Number(settings.awardId);
+  if (!Number.isSafeInteger(awardId) || awardId < 1) {
+    console.error('CGAS_TOUR_AWARD_ID must be a positive numeric phpVMS award ID.');
+    return;
+  }
+  // phpVMS installations in the wild use both the current `user_awards`
+  // name and Laravel's conventional `award_user` name. Detect, don't guess.
+  let pivotTable;
+  for (const candidate of ['user_awards', 'award_user']) {
+    const [tables] = await db.query('SHOW TABLES LIKE ?', [candidate]);
+    if (tables.length) { pivotTable = candidate; break; }
+  }
+  if (!pivotTable) {
+    console.error('CGAS phpVMS award delivery disabled for this run: neither user_awards nor award_user exists.');
+    return;
+  }
+  const [jobs] = await db.query(`SELECT id, user_id, award_attempts FROM bot_cgas_completions
+    WHERE award_status IN ('pending','failed') AND award_attempts < ?
+      AND (award_next_attempt_at IS NULL OR award_next_attempt_at <= UTC_TIMESTAMP())
+    ORDER BY id LIMIT 10`, [MAX_ATTEMPTS]);
+  for (const job of jobs) {
+    try {
+      const [award] = await db.query('SELECT id FROM awards WHERE id=? LIMIT 1', [awardId]);
+      if (!award.length) throw new Error(`phpVMS award ${awardId} does not exist`);
+      await db.query(`INSERT IGNORE INTO ${pivotTable} (award_id, user_id, created_at, updated_at)
+        VALUES (?, ?, UTC_TIMESTAMP(), UTC_TIMESTAMP())`, [awardId, job.user_id]);
+      await db.query(`UPDATE bot_cgas_completions SET award_status='awarded', award_attempts=award_attempts+1,
+        award_last_error=NULL WHERE id=?`, [job.id]);
+    } catch (error) {
+      await db.query(`UPDATE bot_cgas_completions SET award_status='failed', award_attempts=award_attempts+1,
+        award_last_error=?, award_next_attempt_at=DATE_ADD(UTC_TIMESTAMP(), INTERVAL ? MINUTE) WHERE id=?`,
+      [String(error.message).slice(0, 2000), waitMinutes(job.award_attempts), job.id]);
+    }
+  }
+}
+
 async function runChecker({ db: pool, client, tour, settings }) {
   if (!tour.valid) throw new Error(`Invalid CGAS tour configuration: ${tour.errors.join('; ')}`);
   const db = pool.getConnection ? await pool.getConnection() : pool;
@@ -266,6 +304,7 @@ async function runChecker({ db: pool, client, tour, settings }) {
     if (!wasBaseline) await detectNew(db, tour, Boolean(settings.roleId));
     await deliverAnnouncements(db, client, settings, tour.stations.length);
     await awardRoles(db, client, settings);
+    await awardPhpVmsAwards(db, settings);
     return { baselined: wasBaseline };
   } finally {
     if (locked) try { await db.query('SELECT RELEASE_LOCK(?)', [LOCK_NAME]); } catch {}
@@ -292,7 +331,7 @@ module.exports = {
   BATCH_SIZE,
   tokenFor,
   abbreviatedPilotName,
-  reconciliationMarker,
+  announcementMatches,
   fetchPilotVisits,
   scanEligiblePilots,
   ensureVersion,
@@ -304,6 +343,7 @@ module.exports = {
   reconcileSending,
   deliverAnnouncements,
   awardRoles,
+  awardPhpVmsAwards,
   runChecker,
   startCgasTourChecker,
 };
