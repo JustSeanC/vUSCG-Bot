@@ -11,6 +11,22 @@ const tokenFor = (version, userId) => crypto.createHash('sha256').update(`${vers
 const sqlDate = value => new Date(value).toISOString().slice(0, 19).replace('T', ' ');
 const waitMinutes = attempts => Math.min(60, 2 ** Math.max(0, attempts));
 
+// Discord does not provide an idempotency key for message sends. Keep the
+// reconciliation fingerprint in the footer, but encode it with zero-width
+// characters so pilots only see the useful call to action.
+const RECONCILIATION_PREFIX = '\u2063\u2063';
+const reconciliationMarker = token => RECONCILIATION_PREFIX + [...String(token)]
+  .flatMap(character => Number.parseInt(character, 16).toString(2).padStart(4, '0'))
+  .map(bit => bit === '0' ? '\u200b' : '\u200c')
+  .join('');
+
+function abbreviatedPilotName(name) {
+  const safe = String(name || 'Pilot').replace(/[@`*_~|>]/g, '').trim().replace(/\s+/g, ' ');
+  const parts = safe.split(' ').filter(Boolean);
+  if (parts.length < 2) return (parts[0] || 'Pilot').slice(0, 80);
+  return `${parts[0]} ${parts.at(-1).charAt(0).toUpperCase()}.`.slice(0, 80);
+}
+
 async function fetchPilotVisits(db, userIds, codes) {
   if (!userIds.length || !codes.length) return [];
   const userSlots = userIds.map(() => '?').join(',');
@@ -149,8 +165,11 @@ async function resolveRecipient(db, client, guildId, userId) {
 }
 
 function completionEmbed(job, recipient, stationCount) {
-  const safeName = String(recipient.user?.name || 'Pilot').replace(/[@`*_~|>]/g, '').slice(0, 80);
-  const identity = recipient.member ? `<@${recipient.discordId}>` : `**${safeName} (C${recipient.user?.pilot_id ?? 'unknown'})**`;
+  const safeName = abbreviatedPilotName(recipient.user?.name);
+  // A Discord mention is rendered with the member's full server display name,
+  // so it cannot enforce the tour announcement's first-name/last-initial
+  // privacy format. Use the authoritative phpVMS identity consistently.
+  const identity = `**${safeName} (C${recipient.user?.pilot_id ?? 'unknown'})**`;
   const timestamp = Math.floor(new Date(job.completed_at).getTime() / 1000);
   return new EmbedBuilder().setColor(0xf1c40f).setTitle('🏆 CGAS Tour Complete!')
     .setDescription(`Congratulations to ${identity} for visiting every station on the vUSCG CGAS Tour!`)
@@ -158,7 +177,7 @@ function completionEmbed(job, recipient, stationCount) {
       { name: '📍 Final stop', value: String(job.final_station_name).slice(0, 1024), inline: true },
       { name: '🚁 Stations visited', value: `${stationCount}/${stationCount}`, inline: true },
       { name: '📅 Completed', value: `<t:${timestamp}:d>`, inline: true },
-    ).setFooter({ text: `Think you're getting close? Check your progress with /mycgas! · CGAS-${job.announcement_token}` });
+    ).setFooter({ text: `Think you're getting close? Check your progress with /mycgas!${reconciliationMarker(job.announcement_token)}` });
 }
 
 async function reconcileSending(db, channel) {
@@ -173,7 +192,8 @@ async function reconcileSending(db, channel) {
     return;
   }
   for (const job of jobs) {
-    const found = messages.find(m => m.embeds?.some(e => e.footer?.text?.includes(`CGAS-${job.announcement_token}`)));
+    const marker = reconciliationMarker(job.announcement_token);
+    const found = messages.find(m => m.embeds?.some(e => e.footer?.text?.includes(marker)));
     if (found) await db.query(`UPDATE bot_cgas_completions SET announcement_status='sent', announcement_message_id=?,
       announcement_channel_id=?, announcement_last_error=NULL WHERE id=? AND announcement_status='sending'`,
       [found.id, found.channelId, job.id]);
@@ -201,7 +221,7 @@ async function deliverAnnouncements(db, client, settings, stationCount) {
     if (claim.affectedRows !== 1) continue;
     try {
       const sent = await channel.send({ embeds: [completionEmbed(job, recipient, stationCount)],
-        allowedMentions: { parse: [], users: recipient.member ? [recipient.discordId] : [] } });
+        allowedMentions: { parse: [], users: [] } });
       await db.query(`UPDATE bot_cgas_completions SET announcement_status='sent', announcement_channel_id=?,
         announcement_message_id=?, announcement_last_error=NULL WHERE id=? AND announcement_status='sending'`,
       [sent.channelId, sent.id, job.id]);
@@ -271,6 +291,8 @@ function startCgasTourChecker(options) {
 module.exports = {
   BATCH_SIZE,
   tokenFor,
+  abbreviatedPilotName,
+  reconciliationMarker,
   fetchPilotVisits,
   scanEligiblePilots,
   ensureVersion,

@@ -2,7 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadTour, completionFromVisits } = require('../utils/cgas');
 const { resolveCommandPilot } = require('../utils/pilotStats');
-const { baseline, ensureVersion, insertCompletion, queueHistoricalAnnouncements, deliverAnnouncements, awardRoles, tokenFor } = require('../utils/cgasTourChecker');
+const { baseline, ensureVersion, insertCompletion, queueHistoricalAnnouncements, deliverAnnouncements, awardRoles, tokenFor,
+  abbreviatedPilotName, reconciliationMarker, completionEmbed } = require('../utils/cgasTourChecker');
 const { sendEphemeralPages } = require('../utils/pagination');
 
 const config = stations => loadTour({ version: 'v1', stations });
@@ -37,6 +38,29 @@ test('requirement hash ignores names but detects aliases and a new version has a
   assert.equal(original.requirementHash, config([{ ...stations[0], name: 'Corrected A' }, stations[1]]).requirementHash);
   assert.notEqual(original.requirementHash, config([{ ...stations[0], airportCodes: ['NEW'] }, stations[1]]).requirementHash);
   assert.notEqual(tokenFor('v1', 1), tokenFor('v2', 1));
+});
+
+test('completion announcements abbreviate pilot names and hide reconciliation tokens', () => {
+  assert.equal(abbreviatedPilotName('Jane Coast Guard'), 'Jane G.');
+  assert.equal(abbreviatedPilotName('@everyone Smith'), 'everyone S.');
+  assert.equal(abbreviatedPilotName('Cher'), 'Cher');
+
+  const token = tokenFor('v1', 7);
+  const marker = reconciliationMarker(token);
+  const embed = completionEmbed({
+    completed_at: '2026-01-02', final_station_name: 'CGAS B', announcement_token: token,
+  }, { user: { name: 'Jane Coast Guard', pilot_id: 42 } }, 2).toJSON();
+
+  assert.match(embed.description, /Jane G\. \(C42\)/);
+  assert.equal(embed.footer.text.startsWith("Think you're getting close? Check your progress with /mycgas!"), true);
+  assert.equal(embed.footer.text.endsWith(marker), true);
+  assert.doesNotMatch(embed.footer.text, /CGAS-|[a-f0-9]{64}/);
+
+  const linkedEmbed = completionEmbed({
+    completed_at: '2026-01-02', final_station_name: 'CGAS B', announcement_token: token,
+  }, { user: { name: 'Jane Coast Guard', pilot_id: 42 }, discordId: '99', member: {} }, 2).toJSON();
+  assert.match(linkedEmbed.description, /Jane G\. \(C42\)/);
+  assert.doesNotMatch(linkedEmbed.description, /<@99>|Coast Guard/);
 });
 
 test('persisted requirements changed under the same version fail with an actionable error', async () => {
