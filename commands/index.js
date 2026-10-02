@@ -11,5 +11,6 @@ module.exports = {
   myactivity: require('./myactivity'),
   myairports: require('./myairports'),
   mycgas: require('./mycgas'),
+  cgasleaderboard: require('./cgasleaderboard'),
   help: require('./help'),
 };
