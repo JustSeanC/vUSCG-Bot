@@ -1,0 +1,219 @@
+<?php
+
+namespace Modules\VuscgCustom\Console;
+
+use App\Models\Award;
+use App\Models\Typerating;
+use App\Models\User;
+use App\Models\UserAward;
+use DomainException;
+use Illuminate\Console\Command;
+use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Support\Facades\DB;
+use Modules\VuscgCustom\Services\QualificationNativePlan as Plan;
+use Throwable;
+
+final class SyncQualifications extends Command
+{
+    protected $signature = 'vuscg:sync-qualifications {--event= : Process only this qualification event ID}';
+    protected $description = 'Deliver audited vUSCG qualification changes to verified native associations';
+
+    public function handle(): int
+    {
+        $settings = config('vuscg_qualifications', []);
+        if (($settings['enabled'] ?? false) !== true) {
+            $this->line('Native qualification synchronization is disabled.');
+            return self::SUCCESS;
+        }
+
+        $eventId = $this->option('event');
+        if ($eventId !== null && !preg_match('/\A[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\z/', $eventId)) {
+            $this->error('Use a qualification event UUID.');
+            return self::FAILURE;
+        }
+        $jobs = DB::table('vuscg_training_qualification_sync')->whereIn('state', ['pending', 'retry'])
+            ->whereIn('target', ['award', 'ip_role', 'type_rating'])
+            ->when($eventId, fn ($query) => $query->where('event_id', $eventId))
+            ->where('next_attempt_at', '<=', DB::raw('UTC_TIMESTAMP()'))
+            ->orderBy('next_attempt_at')->orderBy('event_id')->orderBy('target')->limit(50)->get();
+        foreach ($jobs as $job) {
+            $nativeId = null;
+            try {
+                DB::transaction(function () use ($job, $settings, &$nativeId): void {
+                    $queue = $this->queue($job)->lockForUpdate()->first();
+                    if (!$this->due($queue)) {
+                        return;
+                    }
+                    $event = DB::table('vuscg_training_qualification_events')->where('event_id', $job->event_id)->first();
+                    $mapping = Plan::target($event, $job->target, $settings);
+                    $nativeId = $mapping['id'] ?? null;
+                    $user = User::query()->whereKey($event->user_id)->lockForUpdate()->first();
+                    if (!$user || $user->getConnection() !== DB::connection() || (string) $user->pilot_id !== (string) $event->public_pilot_id) {
+                        throw new DomainException('pilot_mapping_changed');
+                    }
+                    $scopes = DB::table('vuscg_training_qualification_status')
+                        ->where('user_id', $event->user_id)->where('qualification_id', $event->qualification_id)
+                        ->sharedLock()->get();
+                    $scope = $scopes->firstWhere('program_id', $event->program_id);
+                    if (!$scope || $scope->last_event_id !== $event->event_id) {
+                        $this->record($queue, 'superseded', $nativeId, false);
+                        return;
+                    }
+                    $desired = $scopes->contains(fn ($scope) => (bool) $scope->active);
+                    $marker = Plan::marker($event, $job->target);
+                    if ($job->target === 'type_rating') {
+                        $desired = (bool) $scope->active;
+                        if ($desired && !DB::table('vuscg_training_qualification_sync')->where([
+                            'event_id' => $job->event_id, 'target' => 'award', 'state' => 'complete',
+                        ])->exists()) {
+                            throw new DomainException('awaiting_native_award');
+                        }
+                        [$result, $nativeId] = $this->syncRating($user, $mapping, $marker, $desired, $settings);
+                    } else {
+                        $result = $job->target === 'award'
+                            ? $this->syncAward($user, $mapping, $marker, $desired)
+                            : $this->syncRole($user, $mapping, $marker, $desired);
+                    }
+                    $this->record($queue, $result, $nativeId, false);
+                });
+            } catch (Throwable $error) {
+                $code = $error instanceof DomainException ? $error->getMessage() : 'native_database_or_model_error';
+                DB::transaction(function () use ($job, $code, $nativeId): void {
+                    $queue = $this->queue($job)->lockForUpdate()->first();
+                    if ($this->due($queue)) {
+                        $this->record($queue, $code, $nativeId, true);
+                    }
+                });
+                $this->warn('A qualification sync will retry: '.$code);
+            }
+        }
+
+        return self::SUCCESS;
+    }
+
+    private function queue(object $job)
+    {
+        return DB::table('vuscg_training_qualification_sync')
+            ->where('event_id', $job->event_id)->where('target', $job->target);
+    }
+
+    private function due(?object $job): bool
+    {
+        return $job && $job->state !== 'complete' && $job->next_attempt_at <= gmdate('Y-m-d H:i:s');
+    }
+
+    private function record(object $job, string $result, ?string $nativeId, bool $retry): void
+    {
+        $this->queue($job)->update([
+            'state' => $retry ? 'retry' : 'complete',
+            'attempts' => DB::raw('attempts + 1'),
+            'next_attempt_at' => $retry ? DB::raw('DATE_ADD(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)') : DB::raw('UTC_TIMESTAMP()'),
+        ]);
+        DB::table('vuscg_training_qualification_sync_attempts')->insert([
+            'event_id' => $job->event_id, 'target' => $job->target, 'native_id' => $nativeId,
+            'result' => $result, 'created_at' => DB::raw('UTC_TIMESTAMP(6)'),
+        ]);
+    }
+
+    private function syncAward(User $user, array $mapping, string $marker, bool $active): string
+    {
+        $award = Award::query()->whereKey($mapping['id'])->sharedLock()->first();
+        if (!$award || $award->name !== $mapping['name'] || (new UserAward())->getTable() !== 'user_awards'
+            || (new UserAward())->getConnection() !== DB::connection()) {
+            throw new DomainException('award_mapping_mismatch');
+        }
+        $identity = ['user_id' => $user->id, 'award_id' => $award->id];
+
+        return $this->syncAssociation('user_awards', $identity, $marker, $active, function () use ($identity, $marker): void {
+            // UserAward dispatches the installation's normal model events, including AwardAwarded where declared.
+            $award = (new UserAward())->forceFill($identity + ['vuscg_qualification_owner' => $marker]);
+            if (!$award->save()) {
+                throw new DomainException('award_model_refused_save');
+            }
+        });
+    }
+
+    private function syncRole(User $user, array $mapping, string $marker, bool $active): string
+    {
+        $roles = $user->roles();
+        if (config('laratrust.teams.enabled', false) || !$roles instanceof MorphToMany || $roles->getTable() !== 'role_user'
+            || $roles->getRelated()->getTable() !== 'roles' || $roles->getRelated()->getConnection() !== DB::connection()
+            || $roles->getForeignPivotKeyName() !== 'user_id' || $roles->getRelatedPivotKeyName() !== 'role_id') {
+            throw new DomainException('unsupported_role_relation');
+        }
+        $role = $roles->getRelated()->newQuery()->whereKey($mapping['id'])->sharedLock()->first();
+        if (!$role || $role->name !== $mapping['name']) {
+            throw new DomainException('role_mapping_mismatch');
+        }
+        $identity = ['user_id' => $user->id, 'role_id' => $role->id, $roles->getMorphType() => $roles->getMorphClass()];
+
+        $result = $this->syncAssociation('role_user', $identity, $marker, $active,
+            fn () => $roles->attach($role->id, ['vuscg_qualification_owner' => $marker]));
+        if (method_exists($user, 'flushLaratrustCache') && in_array($result, ['inserted', 'removed_managed'], true)) {
+            DB::afterCommit(fn () => $user->flushLaratrustCache());
+        }
+
+        return $result;
+    }
+
+    private function findRating(string $column, string $code): Typerating
+    {
+        $rows = Typerating::query()->where($column, $code)->sharedLock()->get()
+            ->filter(fn ($row) => $row->getAttribute($column) === $code);
+        if ($rows->count() !== 1) {
+            throw new DomainException('rating_code_missing_or_ambiguous');
+        }
+        return $rows->first();
+    }
+
+    private function syncRating(User $user, array $mapping, string $marker, bool $active, array $settings): array
+    {
+        $column = $settings['rating_code_column'] ?? null;
+        $relation = $user->typeratings();
+        if (!in_array($column, ['code', 'name', 'type'], true) || $relation->getTable() !== 'typerating_user' ||
+            $relation->getForeignPivotKeyName() !== 'user_id' || $relation->getRelatedPivotKeyName() !== 'typerating_id' ||
+            $relation->getRelated()->getConnection() !== DB::connection()) {
+            throw new DomainException('rating_schema_not_verified');
+        }
+        $rating = $this->findRating($column, $mapping['qualified']);
+        if ($active && !$rating->active) {
+            throw new DomainException('qualified_rating_disabled');
+        }
+        $identity = ['user_id' => $user->id, 'typerating_id' => $rating->id];
+        $result = $this->syncAssociation('typerating_user', $identity, $marker, $active,
+            fn () => $relation->attach($rating->id, ['vuscg_qualification_owner' => $marker]));
+        if ($active && !DB::table('typerating_user')->where($identity)->exists()) {
+            throw new DomainException('qualified_rating_not_persisted');
+        }
+        if ($active && $mapping['trainee']) {
+            $trainee = $this->findRating($column, $mapping['trainee']);
+            if ($trainee->id === $rating->id) {
+                throw new DomainException('trainee_rating_equals_qualified');
+            }
+            // This explicit MR graduation transition is the only removal of a preexisting rating.
+            $removed = $relation->detach($trainee->id);
+            if ($removed) {
+                $result .= ':trainee_removed:'.$trainee->id;
+            }
+        }
+
+        return [$result, (string) $rating->id];
+    }
+
+    private function syncAssociation(string $table, array $identity, string $marker, bool $active, callable $insert): string
+    {
+        $existing = DB::table($table)->where($identity)->lockForUpdate()->get();
+        $ownedRow = DB::table($table)->where('vuscg_qualification_owner', $marker)->lockForUpdate()->first();
+        $owned = $existing->contains(fn ($row) => $row->vuscg_qualification_owner === $marker);
+        if ($ownedRow && !$owned) {
+            throw new DomainException('owned_association_mapping_changed');
+        }
+        $operation = Plan::operation($active, $existing->isNotEmpty(), $owned);
+        if ($operation === 'inserted') {
+            $insert();
+        } elseif ($operation === 'removed_managed') {
+            DB::table($table)->where($identity)->where('vuscg_qualification_owner', $marker)->delete();
+        }
+        return $operation;
+    }
+}

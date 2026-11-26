@@ -6,6 +6,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const turf = require('@turf/turf');
+const { startGraduationWorker } = require('./utils/training/graduation');
 const { handlePirepTraining } = require('./utils/training/pirepSignoff');
 const { startPendingPirepWatcher, handlePirepButton } = require('./utils/pendingPireps');
 const flavorTexts = require('./flavorTexts.json');
@@ -167,6 +168,7 @@ client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 
   // Handle PIREP button interactions
+  startGraduationWorker(client, db, process.env.GUILD_ID);
   startPendingPirepWatcher({
     client,
     db,

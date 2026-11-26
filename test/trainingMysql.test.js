@@ -4,6 +4,11 @@ const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const mysql = require('mysql2/promise');
 const training = require('../utils/training/service');
+const qualifications = require('../utils/training/qualifications');
+const dashboard = require('../utils/training/dashboard');
+const { importQualifications } = require('../scripts/import-qualifications');
+const { promoteRank, runGraduations } = require('../utils/training/graduation');
+const { Collection, ChannelType } = require('discord.js');
 const { parseInput, importRows } = require('../utils/training/import');
 
 const port = process.env.TRAINING_TEST_MYSQL_PORT;
@@ -261,6 +266,223 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
     assert.equal((await training.createRecord(db, request)).recordId, recovered.recordId);
     const [rows] = await db.execute('SELECT record_id FROM vuscg_training_records WHERE source_key = ?', [request.sourceKey]);
     assert.deepEqual(rows, [{ record_id: recovered.recordId }]);
+  });
+
+
+  await t.test('006 preserves training rows and audits authorized qualification changes and delivery jobs', async () => {
+    const migration = await readFile(path.join(__dirname, '../migrations/006_training_qualifications.sql'), 'utf8');
+    const [[before]] = await db.query('SELECT COUNT(*) AS total FROM vuscg_training_records');
+    await db.query(migration);
+    await db.query(migration);
+    assert.deepEqual((await db.query('SELECT COUNT(*) AS total FROM vuscg_training_records'))[0][0], before);
+    await db.query(`
+      ALTER TABLE users ADD rank_id INT NOT NULL DEFAULT 12;
+      CREATE TABLE ranks (id INT PRIMARY KEY, name VARCHAR(80));
+      INSERT INTO ranks VALUES (13, 'LTJG');
+      INSERT INTO users (id, pilot_id, name, flight_time) VALUES (50, 55, 'Command Reviewer', 0);
+      INSERT INTO discord_links VALUES ('100000000000000325', 3250), ('100000000000000055', 55);
+    `);
+
+    const previous = process.env.GUILD_ID;
+    process.env.GUILD_ID = 'qualification-fixture';
+    t.after(() => { if (previous === undefined) delete process.env.GUILD_ID; else process.env.GUILD_ID = previous; });
+    let sequence = 0;
+    const context = role => ({
+      db, roles: { COMMAND_STAFF_ROLE_ID: 'command', INSTRUCTOR_PILOT_ROLE_ID: 'instructor' },
+      interaction: {
+        id: '66000000000000' + String(++sequence).padStart(4, '0'),
+        user: { id: role === 'command' ? '100000000000000055' : actor.discordId },
+        inGuild: () => true, guildId: 'qualification-fixture',
+        guild: { members: { fetch: async options => {
+          assert.equal(options.force, true);
+          return { roles: { cache: new Set([role]) } };
+        } } },
+      },
+    });
+    const change = async (qualification, program, action = 'grant', reason = '') =>
+      qualifications.preview(db, { pilotId: 3250, qualification, program, action, date: '2025-11-20', reason });
+    const apply = async (ctx, request) => qualifications.commitConfirmedChange(ctx, request, await qualifications.authorize(ctx, request));
+
+    await assert.rejects(apply(context('instructor'), await change('ip')), /require Command Staff/);
+    await assert.rejects(change('mr', 'stage-zero'), /explicit rw or fw/);
+    const mrRw = await change('mr', 'rw');
+    const mrFw = await change('mr', 'fw');
+    const [rw, fw] = await Promise.all([apply(context('instructor'), mrRw), apply(context('instructor'), mrFw)]);
+    const ip = await apply(context('command'), await change('ip'));
+    for (const key of ['dlq', 'hitron', 'blackjack', 'mq9']) {
+      await apply(context('instructor'), await change(key));
+    }
+    const newKind = await db.query("INSERT INTO vuscg_training_qualifications (qualification_id, name, scope) VALUES ('test-track', 'Test track', 'program')");
+    assert.ok(newKind);
+    const byStaff = await change('test-track', 'fw');
+    const runs = await Promise.allSettled([apply(context('command'), byStaff), apply(context('command'), byStaff)]);
+    assert.equal(runs.filter(result => result.status === 'fulfilled').length, 1);
+    assert.match(runs.find(result => result.status === 'rejected').reason.message, /already active/);
+    const revoke = await change('ip', null, 'revoke', 'Correction');
+    await assert.rejects(apply(context('instructor'), revoke), /require Command Staff/);
+    const reviewing = context('command');
+    const receipt = await apply(reviewing, revoke);
+    assert.deepEqual(await apply(reviewing, revoke), { id: receipt.id, created: false });
+    const history = await qualifications.history(db, pilot.id, 20, 0);
+    const revoked = history.find(row => row.event_id === receipt.id);
+    assert.equal(revoked.reviewer_role, 'command_staff');
+    assert.equal(revoked.reason, 'Correction');
+    assert.equal(revoked.reviewer_pilot_id, 55);
+    assert.equal(revoked.reviewer_discord_id, '100000000000000055');
+    assert.ok((await qualifications.activeAwards(db, pilot.id)).some(row => row.qualification_id === 'mr' && row.program_id === 'fw'));
+    assert.ok(!(await qualifications.activeAwards(db, pilot.id)).some(row => row.qualification_id === 'ip'));
+
+    const targets = async id => (await db.execute('SELECT target FROM vuscg_training_qualification_sync WHERE event_id=? ORDER BY target', [id]))[0].map(row => row.target);
+    assert.deepEqual(await targets(rw.id), ['award', 'type_rating', 'graduation']);
+    assert.deepEqual(await targets(fw.id), ['award', 'type_rating', 'graduation']);
+    assert.deepEqual(await targets(ip.id), ['award', 'ip_role']);
+    const [events] = await db.execute('SELECT * FROM vuscg_training_qualification_events WHERE event_id IN (?, ?)', [rw.id, fw.id]);
+    const rankFor = async () => (await db.execute('SELECT rank_id FROM users WHERE id=10'))[0][0].rank_id;
+    assert.equal(await rankFor(), 12);
+    assert.equal(await promoteRank(db, events[0], 'LTJG'), true);
+    assert.equal(await rankFor(), 13);
+    assert.equal(await promoteRank(db, events[1], 'LTJG'), false);
+    await db.execute('UPDATE users SET rank_id=16 WHERE id=10');
+    assert.equal(await promoteRank(db, events[1], 'LTJG'), false);
+    assert.equal(await rankFor(), 16);
+    const revokedMr = await apply(context('command'), await change('mr', events[0].program_id, 'revoke', 'Review required'));
+    assert.deepEqual(await targets(revokedMr.id), ['award', 'type_rating']);
+    assert.equal(await rankFor(), 16);
+
+    const file = [
+      { source_id: 'historical-ip', pilot_id: 3250, qualification_id: 'ip', tracker_label: 'IP', flag: 'YES',
+        date: '2025-11-20', review: 'Reviewed approved evidence' },
+      { source_id: 'no', flag: 'NO' },
+      { source_id: 'ambiguous', flag: 'YES' },
+    ];
+    const report = await importQualifications(db, file, { dataset: 'tracker' });
+    assert.deepEqual(report.map(item => item.status), ['ready', 'ignored_no', 'rejected']);
+    const [[stagingCount]] = await db.query('SELECT COUNT(*) AS total FROM vuscg_training_qualification_imports');
+    assert.equal(stagingCount.total, 0);
+    await importQualifications(db, file, { dataset: 'tracker', stage: true });
+    await importQualifications(db, file, { dataset: 'tracker', stage: true });
+    const candidate = await qualifications.preview(db, { candidateId: report[0].candidateId, reason: 'Verified staff review' });
+    assert.equal(candidate.source.provenance.trackerLabel, 'IP');
+    await assert.rejects(apply(context('instructor'), candidate), /require Command Staff/);
+    const historical = await apply(context('command'), candidate);
+    assert.deepEqual(await targets(historical.id), ['award', 'ip_role']);
+  });
+
+  await t.test('dashboard paginates enrollments and separates dates, verified instructors, and imported activity', async () => {
+    await training.setEnrollment(db, { userId: pilot.id, programId: 'rw', active: true, actor });
+    await training.setEnrollment(db, { userId: '30', programId: 'rw', active: true, actor });
+    const firstRows = await dashboard.roster(db, { days: 30, limit: 1, offset: 0 });
+    const secondRows = await dashboard.roster(db, { days: 30, limit: 1, offset: 1 });
+    assert.equal(firstRows[0].pilot_id, 11);
+    assert.equal(firstRows[0].followup, 'no_record');
+    assert.equal(Number(firstRows[0].slots_without_mr), 0);
+    assert.equal(secondRows[0].pilot_id, 3250);
+    assert.ok(secondRows[0].awards.length > 1);
+    assert.deepEqual((await dashboard.roster(db, { program: 'fw', days: 14, status: 'active', limit: 5, offset: 0 }))
+      .map(item => item.program_id), ['fw']);
+    const stats = await dashboard.stats(db, ['2025-11-05', '2025-11-05'], 60);
+    assert.equal(stats.enrollment.pilots, 2);
+    assert.equal(stats.enrollment.enrollments, 3);
+    assert.equal(stats.enrollment.multi, 1);
+    assert.equal(Number(stats.attempts.attempts), 1);
+    assert.equal(Number(stats.attempts.imported), 1);
+    const counts = await dashboard.instructors(db, ['2025-11-01', '2025-11-30'], 5, 0);
+    assert.deepEqual(counts.rows.map(item => item.instructor_pilot_id), [11]);
+    assert.equal(counts.rows[0].trainees, 1);
+    assert.equal(counts.imported.attempts, 1);
+    const none = await dashboard.instructors(db, ['2020-01-01', '2020-12-31'], 5, 0);
+    assert.deepEqual(none.rows, []);
+  });
+
+
+  await t.test('007 preserves manual native pivots and supports precise owned-row removal', async () => {
+    await db.query(`
+      CREATE TABLE user_awards (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, award_id INT);
+      CREATE TABLE role_user (user_id INT, role_id INT, user_type VARCHAR(80), PRIMARY KEY (user_id, role_id, user_type));
+      CREATE TABLE typerating_user (user_id INT, typerating_id INT, PRIMARY KEY (user_id, typerating_id));
+      INSERT INTO user_awards (user_id, award_id) VALUES (10, 8);
+      INSERT INTO role_user VALUES (10, 20, 'user');
+      INSERT INTO typerating_user VALUES (10, 100), (10, 200);
+    `);
+    await db.query(await readFile(path.join(__dirname, '../migrations/007_training_native_ownership.sql'), 'utf8'));
+    const owned = 'b'.repeat(64);
+    await db.execute('INSERT INTO user_awards (user_id, award_id, vuscg_qualification_owner) VALUES (?, ?, ?)', [10, 8, owned]);
+    await assert.rejects(db.execute('INSERT INTO user_awards (user_id, award_id, vuscg_qualification_owner) VALUES (?, ?, ?)',
+      [10, 8, owned]), { code: 'ER_DUP_ENTRY' });
+    await db.execute('DELETE FROM user_awards WHERE user_id=? AND award_id=? AND vuscg_qualification_owner=?', [10, 8, owned]);
+    const [[manual]] = await db.execute('SELECT vuscg_qualification_owner FROM user_awards WHERE user_id=10 AND award_id=8');
+    assert.equal(manual.vuscg_qualification_owner, null);
+    const [[role]] = await db.execute('SELECT vuscg_qualification_owner FROM role_user WHERE user_id=10 AND role_id=20');
+    assert.equal(role.vuscg_qualification_owner, null);
+    const [ratings] = await db.execute('SELECT typerating_id FROM typerating_user WHERE user_id=10 ORDER BY typerating_id');
+    assert.deepEqual(ratings.map(item => item.typerating_id), [100, 200]);
+  });
+
+
+  await t.test('audited graduation resumes after Discord outage and announces once after dependencies', async () => {
+    const [[event]] = await db.query(`SELECT e.* FROM vuscg_training_qualification_status s
+      JOIN vuscg_training_qualification_events e ON e.event_id = s.last_event_id
+      WHERE s.qualification_id = 'mr' AND s.active AND s.user_id = 10`);
+    const roleIds = { pilot: '110000000000000001', cadet: '110000000000000002', rw: '110000000000000003',
+      fw: '110000000000000004', o2: '110000000000000005' };
+    const previous = {};
+    const settings = { TRAINING_GRADUATION_RANK_NAME: 'LTJG', TRAINING_CHANNEL_ID: 'fixture-parent',
+      ...Object.fromEntries(Object.entries(roleIds).map(([key, value]) => [`TRAINING_GRADUATION_${key.toUpperCase()}_ROLE_ID`, value])) };
+    for (const [key, value] of Object.entries(settings)) { previous[key] = process.env[key]; process.env[key] = value; }
+    t.after(() => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+    const opposite = roleIds[event.program_id === 'rw' ? 'fw' : 'rw'];
+    const roles = new Set([opposite, roleIds.cadet, 'senior']);
+    let failed = false;
+    let announcements = 0;
+    const user = {
+      manageable: true,
+      roles: { cache: roles, add: async id => {
+        if (id === roleIds[event.program_id] && !failed) { failed = true; throw new Error('Discord unavailable'); }
+        roles.add(id);
+      }, remove: async id => { roles.delete(id); } },
+      setNickname: async name => { user.nickname = name; },
+    };
+    const thread = {
+      id: 'thread', parentId: 'fixture-parent', type: ChannelType.PrivateThread, name: 'Training Case for C3250',
+      members: { fetch: async ({ member }) => member === event.graduate_discord_id },
+      send: async message => { assert.deepEqual(message.allowedMentions.parse, []); announcements++; },
+    };
+    const guild = {
+      roles: { fetch: async () => new Map(Object.values(roleIds).map(id => [id, { editable: true, permissions: { has: () => false } }])) },
+      members: { fetch: async opts => { assert.equal(opts.user, event.graduate_discord_id); return user; } },
+      channels: { fetch: async () => ({ id: 'fixture-parent', threads: {
+        fetchActive: async () => ({ threads: new Collection([[thread.id, thread]]) }),
+        fetchArchived: async () => ({ threads: new Collection(), hasMore: false }),
+      } }) },
+    };
+    const client = { guilds: { fetch: async () => guild } };
+    const due = () => db.execute("UPDATE vuscg_training_qualification_sync SET next_attempt_at=UTC_TIMESTAMP() WHERE event_id=? AND target='graduation'", [event.event_id]);
+    const state = async () => (await db.execute("SELECT state FROM vuscg_training_qualification_sync WHERE event_id=? AND target='graduation'", [event.event_id]))[0][0].state;
+    await runGraduations(client, db, 'qualification-fixture');
+    assert.equal(await state(), 'retry');
+    assert.equal(failed, false);
+    for (const target of ['award', 'type_rating']) {
+      await db.execute("UPDATE vuscg_training_qualification_sync SET state='complete' WHERE event_id=? AND target=?", [event.event_id, target]);
+      await db.execute(`INSERT INTO vuscg_training_qualification_sync_attempts (event_id,target,result,created_at)
+        VALUES (?,?,'inserted',UTC_TIMESTAMP(6))`, [event.event_id, target]);
+    }
+    await due();
+    await runGraduations(client, db, 'qualification-fixture');
+    assert.equal(await state(), 'retry');
+    assert.ok(roles.has(roleIds.cadet));
+    await due();
+    await runGraduations(client, db, 'qualification-fixture');
+    await runGraduations(client, db, 'qualification-fixture');
+    assert.equal(await state(), 'complete');
+    assert.equal(announcements, 1);
+    assert.ok(roles.has(roleIds[event.program_id]) && roles.has(opposite) && roles.has('senior'));
+    assert.ok(!roles.has(roleIds.cadet) && !roles.has(roleIds.o2));
+    assert.equal(user.nickname, 'C3250 CDR Example P');
   });
 
 });

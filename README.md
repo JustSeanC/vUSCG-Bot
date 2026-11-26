@@ -161,23 +161,9 @@ The command does not send directly. In one database transaction it changes only 
 
 ---
 
-### `/promote` — Instructor Pilots OR Command Staff
-**Purpose:** Promote a trainee who completed training.
+### `/qualification grant qualification:mr` — Instructor Pilots or Command Staff
 
-**What it does:**
-- Updates phpVMS: sets `users.rank_id` to the new rank (as configured in code).
-- Updates Discord:
-  - removes trainee/cadet role(s)
-  - adds Pilot identity role
-  - adds specialization role (Fixed or Rotary)
-  - applies rank role(s) as configured
-
-**Options:**
-- `pilot_id` (int)
-- `user` (Discord user)
-- `track` (`fixed` or `rotary`)
-
----
+Use `/qualification grant pilot_id:3250 qualification:mr program:rw` or `program:fw` for audited Mission Rated graduation. See the [P04 training guide](docs/training-p04.md) for the qualification commands and staging gates.
 
 ### `/forceranksync` — Command Staff only
 **Purpose:** Force a full rank update pass using phpVMS flight time.

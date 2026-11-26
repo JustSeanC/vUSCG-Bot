@@ -310,6 +310,6 @@ async function history(db, userId, limit, offset) {
 }
 
 module.exports = {
-  findPilot, linkedPilot, linkedDiscordForPilot, getProgram, acceptedPilot, previewEvaluation, setEnrollment, prepareRecord, inspectImport,
+  first, transaction, findPilot, linkedPilot, linkedDiscordForPilot, getProgram, acceptedPilot, previewEvaluation, setEnrollment, prepareRecord, inspectImport,
   createRecord, getRecord, voidRecord, progress, summarizeProgress, history,
 };

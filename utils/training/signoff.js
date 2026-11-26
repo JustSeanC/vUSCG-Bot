@@ -7,7 +7,7 @@ function canUse(action, targeted, hasRole, roles) {
   const command = Boolean(roles.COMMAND_STAFF_ROLE_ID && hasRole(roles.COMMAND_STAFF_ROLE_ID));
   const instructor = Boolean(roles.INSTRUCTOR_PILOT_ROLE_ID && hasRole(roles.INSTRUCTOR_PILOT_ROLE_ID));
   if (action === 'void' || action === 'enroll') return command;
-  if (action === 'record' || action === 'pilot' || (action === 'history' && targeted)) return command || instructor;
+  if (['record', 'pilot', 'roster', 'stats', 'instructors'].includes(action) || (action === 'history' && targeted)) return command || instructor;
   return action === 'progress' || action === 'history';
 }
 

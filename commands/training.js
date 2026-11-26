@@ -1,5 +1,7 @@
 const { EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 const service = require('../utils/training/service');
+const qualifications = require('../utils/training/qualifications');
+const { showDashboard } = require('../utils/training/dashboardDiscord');
 const { canUse, confirmedActor, saveSignoff } = require('../utils/training/signoff');
 const {
   TrainingError, OUTCOMES, TEXT_LIMIT, code, text,
@@ -14,6 +16,10 @@ const trackOption = option => option.setName('track').setDescription('Training p
   .setMaxLength(32).setRequired(true);
 const pageOption = option => option.setName('page').setDescription('Page to display (default 1)')
   .setMinValue(1).setMaxValue(100000);
+
+const dateOptions = sub => sub
+  .addStringOption(o => o.setName('start').setDescription('Start date YYYY-MM-DD, inclusive').setMaxLength(10))
+  .addStringOption(o => o.setName('end').setDescription('End date YYYY-MM-DD, inclusive').setMaxLength(10));
 
 const definition = new SlashCommandBuilder()
   .setName('training').setDescription('Record and view vUSCG training')
@@ -38,7 +44,15 @@ const definition = new SlashCommandBuilder()
     .addBooleanOption(o => o.setName('active').setDescription('True to start or resume (default), false to pause')))
   .addSubcommand(sub => sub.setName('void').setDescription('Command Staff: void a training record and retain its audit history')
     .addStringOption(o => o.setName('record_id').setDescription('Training record UUID').setMinLength(36).setMaxLength(36).setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason for voiding the record').setMaxLength(TEXT_LIMIT).setRequired(true)));
+    .addStringOption(o => o.setName('reason').setDescription('Reason for voiding the record').setMaxLength(TEXT_LIMIT).setRequired(true)))
+  .addSubcommand(sub => sub.setName('roster').setDescription('Staff: browse enrolled pilots and follow-up indicators')
+    .addStringOption(o => o.setName('track').setDescription('Optional training program code').setMaxLength(32))
+    .addStringOption(o => o.setName('status').setDescription('Filter enrollment status')
+      .addChoices({ name: 'Active', value: 'active' }, { name: 'Paused or unavailable', value: 'paused' }))
+    .addIntegerOption(pageOption))
+  .addSubcommand(sub => dateOptions(sub.setName('stats').setDescription('Staff: view training and qualification statistics')))
+  .addSubcommand(sub => dateOptions(sub.setName('instructors').setDescription('Staff: view verified instructor activity'))
+    .addIntegerOption(pageOption));
 
 async function record(ctx, staffPilot, pilotId) {
   const { db, interaction } = ctx;
@@ -116,6 +130,7 @@ async function execute(ctx) {
   try {
     checkRate(interaction.user.id);
     await interaction.deferReply({ ephemeral: true });
+    if (['roster', 'stats', 'instructors'].includes(action)) return await showDashboard(ctx, action);
     if (['record', 'enroll', 'void'].includes(action)) {
       const staffPilot = await service.linkedPilot(db, interaction);
       if (action === 'record') return await record(ctx, staffPilot, pilotId);
@@ -129,7 +144,7 @@ async function execute(ctx) {
     if (!Number.isSafeInteger(page) || page < 1 || page > 100000) throw new TrainingError('Enter a valid page number.');
     const embed = action === 'history'
       ? historyEmbed(pilot, await service.history(db, pilot.id, HISTORY_PAGE_SIZE + 1, (page - 1) * HISTORY_PAGE_SIZE), page)
-      : progressEmbed(pilot, await service.progress(db, pilot.id), page);
+      : progressEmbed(pilot, await service.progress(db, pilot.id), page, await qualifications.activeAwards(db, pilot.id));
     await interaction.editReply({ embeds: [embed], allowedMentions: noMentions });
   } catch (error) {
     const content = error instanceof TrainingError ? error.message

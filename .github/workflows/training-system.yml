@@ -41,3 +41,9 @@ jobs:
       - run: test -n "$TRAINING_TEST_MYSQL_PORT" && npm test
         env:
           TRAINING_TEST_MYSQL_PORT: ${{ job.services.mysql.ports[3306] }}
+      - name: PHP 8.1 lint and qualification synchronization policy tests
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo php:8.1-cli sh -ec '
+            find integrations/phpvms7 -name "*.php" -print0 | xargs -0 -n1 php -l
+            php integrations/phpvms7/tests/QualificationNativePlanTest.php
+          '

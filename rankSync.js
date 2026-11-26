@@ -19,6 +19,13 @@ const rankTitles = {
   17: "CAPT",  // O-6 CAPT
 };
 
+function formatRankNickname(pilot) {
+  const name = String(pilot.name ?? '').trim();
+  const [first, last] = name.split(/\s+/);
+  return [`C${pilot.pilot_id}`, rankTitles[pilot.rank_id], first, last?.[0].toUpperCase()]
+    .filter(Boolean).join(' ').slice(0, 32);
+}
+
 async function syncRanks(client, db, guildId) {
   const guild = await client.guilds.fetch(guildId);
   await guild.members.fetch(); // populate cache
@@ -82,16 +89,7 @@ async function syncRanks(client, db, guildId) {
       // ------------------------
       // NICKNAME SYNC
       // ------------------------
-      let newNickname = `C${pilot.pilot_id}`;
-      if (rankTitle && !rankTitle.startsWith("Unknown")) {
-        newNickname += ` ${rankTitle}`;
-      }
-
-      if (pilot.name) {
-        const [firstName, ...lastParts] = pilot.name.trim().split(" ");
-        const lastInitial = lastParts.length ? lastParts[0][0].toUpperCase() : "";
-        newNickname += ` ${firstName} ${lastInitial}`;
-      }
+      const newNickname = formatRankNickname(pilot);
 
       if (member.nickname !== newNickname) {
         await member.setNickname(newNickname).catch(() => {});
@@ -107,3 +105,4 @@ async function syncRanks(client, db, guildId) {
 }
 
 module.exports = syncRanks;
+module.exports.formatRankNickname = formatRankNickname;

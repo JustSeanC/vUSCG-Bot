@@ -77,7 +77,8 @@ test('help access mirrors member, Instructor Pilot, Command Staff, and multiple 
   const roles = { COMMAND_STAFF_ROLE_ID: 'c', INSTRUCTOR_PILOT_ROLE_ID: 'i' };
   const visible = ids => Object.entries(metadata).filter(([, v]) => v?.category && metadata.canView(v.access, id => ids.includes(id), roles)).map(([k]) => k);
   assert.ok(!visible([]).includes('activate'));
-  assert.ok(visible(['i']).includes('promote'));
+  assert.ok(visible(['i']).includes('qualification'));
+  assert.ok(!visible(['i']).includes('promote'));
   assert.ok(!visible(['i']).includes('activity90'));
   assert.ok(visible(['c']).includes('activate'));
   assert.ok(visible(['c', 'i']).includes('moveaircraft'));

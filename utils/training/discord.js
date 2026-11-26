@@ -69,9 +69,12 @@ async function confirm(interaction, summary, label = 'Confirm') {
   return accepted;
 }
 
-function progressEmbed(pilot, tracks, page) {
+function progressEmbed(pilot, tracks, page, awards = []) {
   const active = tracks.filter(track => track.active);
   const embed = new EmbedBuilder().setTitle(`Training progress · ${pilotLabel(pilot)}`);
+  const labels = awards.map(award => `${safe(award.name)}${award.program_id ? ` (${safe(award.program_id)})` : ''}`);
+  if (!awards.some(award => award.qualification_id === 'mr')) labels.unshift('Mission Rated unawarded');
+  embed.addFields({ name: 'Qualifications', value: labels.join(' · ').slice(0, 1024) });
   if (!tracks.length) return embed.setDescription('No training enrollments.');
   const pages = tracks.flatMap(track => {
     const lessons = [
@@ -100,6 +103,8 @@ function progressEmbed(pilot, tracks, page) {
     .setDescription([
       `**${safe(track.name)} (${safe(track.id)})** · ${track.active ? 'Active' : 'Inactive'}`,
       `${track.completed.length}/${total(track)} configured lessons passed`,
+      ['rw', 'fw'].includes(track.id) && !awards.some(award => award.qualification_id === 'mr' && (!award.program_id || award.program_id === track.id))
+        ? 'Mission Rated for this track: unawarded' : '',
       `Program completion: ${track.curriculumComplete ? completion(track.completed.length, total(track)) : 'unavailable while the curriculum is incomplete'}`,
       `Active enrollments: ${active.length} · Overall: ${allDone}/${allCount} configured lessons · ${overall}`,
       `Most recent signoff entered: ${lastSignoff}`,

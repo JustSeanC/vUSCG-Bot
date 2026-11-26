@@ -1,7 +1,6 @@
 module.exports = {
   forceranksync: require('./forceranksync'),
   activate: require('./activate'),
-  promote: require('./promote'),
   location: require('./location'),
   mission: require('./mission'),
   moveaircraft: require('./moveaircraft'),
@@ -14,4 +13,5 @@ module.exports = {
   cgasleaderboard: require('./cgasleaderboard'),
   help: require('./help'),
   training: require('./training'),
+  qualification: require('./qualification'),
 };

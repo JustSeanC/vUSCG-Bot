@@ -3,6 +3,7 @@ require('dotenv').config();
 
 const commands = [
   require('./commands/training').definition.toJSON(),
+  require('./commands/qualification').definition.toJSON(),
   new SlashCommandBuilder().setName('myactivity').setDescription('Show pilot activity status and lifetime statistics')
     .addUserOption(o => o.setName('user').setDescription('Staff: linked Discord member to view').setRequired(false))
     .addIntegerOption(o => o.setName('pilot_id').setDescription('Staff: public numeric vUSCG Pilot ID').setRequired(false).setMinValue(1)).toJSON(),
@@ -73,30 +74,6 @@ new SlashCommandBuilder()
 
   
   .toJSON(),
-  new SlashCommandBuilder()
-    .setName('promote')
-    .setDescription('Promote a user to vUSCG Pilot and assign a track')
-    .addIntegerOption(option =>
-      option.setName('pilot_id')
-        .setDescription('Pilot ID (e.g., 3020)')
-        .setRequired(true)
-    )
-    .addUserOption(option =>
-      option.setName('user')
-        .setDescription('Discord user to promote')
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option.setName('track')
-        .setDescription('Select training track')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Rotary Wing', value: 'rotary' },
-          { name: 'Fixed Wing', value: 'fixed' }
-        )
-    )
-    .toJSON(),
-
 // Mission generator command
 new SlashCommandBuilder()
   .setName('mission')

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { ChannelType, Collection } = require('discord.js');
 const command = require('../commands/training');
 const service = require('../utils/training/service');
+const qualifications = require('../utils/training/qualifications');
 const { parseInput, importRows } = require('../utils/training/import');
 const { evaluation, trainingDate, pilotNumber } = require('../utils/training/validation');
 const { progressEmbed, postTrainingUpdate } = require('../utils/training/discord');
@@ -16,7 +17,7 @@ test('training slash definition exposes the six authorized workflows', () => {
   const definition = require('../commands').training.definition.toJSON();
   assert.equal(definition.name, 'training');
   assert.equal(definition.options[0].options.find(option => option.name === 'pirep_id').required, false);
-  assert.deepEqual(definition.options.map(({ name }) => name), ['record', 'progress', 'pilot', 'history', 'enroll', 'void']);
+  assert.deepEqual(definition.options.map(({ name }) => name), ['record', 'progress', 'pilot', 'history', 'enroll', 'void', 'roster', 'stats', 'instructors']);
   assert.equal(command.canUse('enroll', true, id => id === 'command', roles), true);
   assert.equal(command.canUse('void', true, id => id === 'instructor', roles), false);
   assert.equal(command.canUse('record', true, id => id === 'instructor', roles), true);
@@ -132,6 +133,10 @@ test('wrong guild and unauthorized cross-pilot commands never touch storage', ()
 }));
 
 test('self progress uses the linked account, even with an injected pilot ID', t => withGuild(async () => {
+  t.mock.method(qualifications, 'activeAwards', async (_, id) => {
+    assert.equal(id, pilot.id);
+    return [{ qualification_id: 'hitron', name: 'HITRON' }];
+  });
   t.mock.method(service, 'linkedPilot', async () => pilot);
   t.mock.method(service, 'progress', async (db, id) => {
     assert.equal(id, pilot.id);
@@ -140,6 +145,7 @@ test('self progress uses the linked account, even with an injected pilot ID', t 
   const { ctx, log } = context({ action: 'progress', target: 1234 });
   await command.execute(ctx);
   assert.match(log.at(-1)[1].embeds[0].data.title, /C3250/);
+  assert.match(log.at(-1)[1].embeds[0].data.fields[0].value, /HITRON/);
   assert.equal(log[0][1].ephemeral, true);
 }));
 
