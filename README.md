@@ -348,6 +348,10 @@ On startup (and then every hour), the bot runs rank sync:
 - This bot assumes phpVMS v7 schema conventions (e.g., `users`, `aircraft`, `airports`, `pireps`).
 - Identity resolution depends on consistent `C####` nicknames and/or `discord_links` created during `/activate`.
 
+## Manual training records
+
+See the [P02 training guide](docs/training-p02.md) for signoffs, enrollment, and deployment.
+
 ## Test and deployment workflow
 
 From the bot checkout, review and deploy the feature branch normally (do not commit `.env`):

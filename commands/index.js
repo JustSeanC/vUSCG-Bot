@@ -13,4 +13,5 @@ module.exports = {
   mycgas: require('./mycgas'),
   cgasleaderboard: require('./cgasleaderboard'),
   help: require('./help'),
+  training: require('./training'),
 };

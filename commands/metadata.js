@@ -3,6 +3,7 @@ module.exports = {
   myairports: { category: 'Personal Activity', description: 'List airports visited by accepted PIREP arrival. Staff may target another pilot.', usage: '/myairports', access: 'member' },
   mycgas: { category: 'Personal Activity', description: 'Show progress through the current Coast Guard air-station tour. Staff may target another pilot.', usage: '/mycgas', access: 'member' },
   cgasleaderboard: { category: 'Staff Tools', description: 'Rank active pilots by current CGAS tour progress and identify completers.', usage: '/cgasleaderboard', access: 'staffOrInstructor' },
+  training: { category: 'Personal Activity', description: 'View private training progress or history. Staff can record evaluations and look up pilots.', usage: '/training progress', access: 'member' },
   help: { category: 'Personal Activity', description: 'Show commands available to you.', usage: '/help', access: 'member' },
   location: { category: 'Flight Operations', description: 'Find aircraft by registration, type, or airport.', usage: '/location search:C6052', access: 'member' },
   mission: { category: 'Flight Operations', description: 'Generate a mission and available aircraft.', usage: '/mission type:SAR aircraft:H60', access: 'member' },
