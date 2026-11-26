@@ -39,7 +39,9 @@ module.exports = {
         }
 
         if (newRankId !== pilot.rank_id) {
-          await db.query('UPDATE users SET rank_id = ? WHERE id = ?', [newRankId, pilot.id]);
+          const [result] = await db.query('UPDATE users SET rank_id = ? WHERE id = ? AND rank_id <=> ?',
+            [newRankId, pilot.id, pilot.rank_id]);
+          if (!result.affectedRows) continue;
           updatedCount++;
           console.log(`✅ Updated C${pilot.pilot_id} → rank_id ${newRankId} (${hours.toFixed(1)} hrs)`);
         }

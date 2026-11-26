@@ -26,6 +26,16 @@ function formatRankNickname(pilot) {
     .filter(Boolean).join(' ').slice(0, 32);
 }
 
+function findRankMember(members, links, pilotId) {
+  const linked = links.filter(link => String(link.pilot_id) === String(pilotId));
+  if (linked.length !== 1) return undefined;
+  const discordId = String(linked[0].discord_id);
+  if (links.some(link => String(link.discord_id) === discordId && String(link.pilot_id) !== String(pilotId))) {
+    return undefined;
+  }
+  return members.get(discordId);
+}
+
 async function syncRanks(client, db, guildId) {
   const guild = await client.guilds.fetch(guildId);
   await guild.members.fetch(); // populate cache
@@ -35,17 +45,13 @@ async function syncRanks(client, db, guildId) {
     "SELECT pilot_id, rank_id, state, name, flight_time FROM users WHERE state IN (1,3) AND pilot_id >= 2000"
   );
 
+  const [links] = await db.query('SELECT CAST(discord_id AS CHAR) AS discord_id, pilot_id FROM discord_links');
+
   for (const pilot of rows) {
     try {
-      const expectedNicknamePrefix = `C${pilot.pilot_id} `;
-      const member = guild.members.cache.find(
-        (m) => m.nickname && m.nickname.startsWith(expectedNicknamePrefix)
-      );
-
+      const member = findRankMember(guild.members.cache, links, pilot.pilot_id);
       if (!member) {
-        console.warn(
-          `⚠️ Skipping pilot ${pilot.pilot_id} — no Discord member with nickname prefix "${expectedNicknamePrefix}…"`
-        );
+        console.warn(`Skipping rank sync for C${pilot.pilot_id}: no unambiguous Discord account.`);
         continue;
       }
 
@@ -106,3 +112,4 @@ async function syncRanks(client, db, guildId) {
 
 module.exports = syncRanks;
 module.exports.formatRankNickname = formatRankNickname;
+module.exports.findRankMember = findRankMember;

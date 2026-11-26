@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHmac } = require('node:crypto');
-const { Collection, ChannelType } = require('discord.js');
+const { Collection, ChannelType, EmbedBuilder } = require('discord.js');
 const { Response } = require('node-fetch');
 const { createPirepBridge } = require('../utils/pirepBridge');
 const { handlePirepButton, tickWatcher } = require('../utils/pendingPireps');
@@ -90,10 +90,9 @@ function interactionContext(allowed, result) {
   return {
     calls,
     roles: { INSTRUCTOR_PILOT_ROLE_ID: 'training' },
-    hasRole: role => allowed && role === 'training',
     db: {
       async query(sql, params) {
-        assert.match(sql, /^SELECT pilot_id FROM discord_links/);
+        assert.match(sql, /^SELECT u\.pilot_id FROM discord_links/);
         assert.deepEqual(params, [reviewer.discord_id]);
         return [[{ pilot_id: 121 }]];
       },
@@ -108,7 +107,12 @@ function interactionContext(allowed, result) {
     interaction: {
       customId: `pirep:approve:${id}`,
       user: { id: reviewer.discord_id, tag: 'Instructor' },
-      message: { embeds: [] },
+      client: { user: { id: 'bot' } },
+      guild: { members: { fetch: async options => {
+        assert.deepEqual(options, { user: reviewer.discord_id, force: true });
+        return { roles: { cache: new Set(allowed ? ['training'] : []) } };
+      } } },
+      message: { author: { id: 'bot' }, embeds: [new EmbedBuilder().setFooter({ text: `PIREP: ${id}` }).toJSON()] },
       reply: async message => calls.push(['reply', message]),
       deferUpdate: async () => calls.push(['defer']),
       editReply: async message => calls.push(['edit', message]),
@@ -120,8 +124,8 @@ function interactionContext(allowed, result) {
 test('Discord permission is checked before requesting a decision', async () => {
   const context = interactionContext(false, {});
   await handlePirepButton(context);
-  assert.deepEqual(context.calls.map(([call]) => call), ['reply']);
-  assert.match(context.calls[0][1].content, /permission/);
+  assert.deepEqual(context.calls.map(([call]) => call), ['defer', 'followUp']);
+  assert.match(context.calls[1][1].content, /permission/);
 });
 
 test('confirmed denial removes Discord buttons even if the reviewer clicked approve', async () => {
@@ -243,4 +247,23 @@ test('watcher restart retries incomplete external resolution without creating ne
   await tickWatcher(options);
   assert.deepEqual(edits, [['Rest-654', ['View']], [id, ['Record Training', 'View']]]);
   assert.deepEqual(JSON.parse(persisted), {});
+});
+
+
+test('review controls fail closed when the message binding is stale or the role lookup fails', async () => {
+  const mismatched = interactionContext(true, { code: 'disabled' });
+  mismatched.interaction.message.embeds[0].footer.text = 'PIREP: Other-Report';
+  await handlePirepButton(mismatched);
+  assert.deepEqual(mismatched.calls.map(([call]) => call), ['reply']);
+  const unavailable = interactionContext(true, {});
+  unavailable.interaction.guild.members.fetch = async () => { throw new Error('Discord unavailable'); };
+  await handlePirepButton(unavailable);
+  assert.deepEqual(unavailable.calls.map(([call]) => call), ['defer', 'followUp']);
+});
+
+test('a disabled decision never simulates a resolution', async () => {
+  const context = interactionContext(true, { code: 'disabled' });
+  await handlePirepButton(context);
+  assert.deepEqual(context.calls.map(([call]) => call), ['defer', 'decision', 'followUp']);
+  assert.match(context.calls.at(-1)[1].content, /Approval through Discord is disabled/);
 });

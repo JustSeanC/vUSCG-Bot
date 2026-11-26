@@ -35,7 +35,7 @@ The PHP worker processes due award, role, and type-rating jobs, preserves native
 
 ### Recovery
 
-Review `vuscg_training_qualification_sync` and `vuscg_training_qualification_sync_attempts` by event ID. Clear causes such as bad mappings, missing Discord links, hierarchy, or downtime; failed jobs become due again after 15 minutes. Distinguish native grant results from `preserved_existing` and `superseded`. Review any revoked association that was manual. The Discord worker retries partial role/nickname updates idempotently. If the announcement was interrupted after send started, verify the private thread before resetting that graduation job’s announcement checkpoint and rescheduling it. Never reissue the qualification solely to repair delivery.
+View job state and last result in `/qualification history`. For detailed recovery, inspect `vuscg_training_qualification_sync` and `vuscg_training_qualification_sync_attempts` by event ID. Clear causes such as bad mappings, missing Discord links, hierarchy, or downtime; failed jobs become due again after 15 minutes. Distinguish native grant results from `preserved_existing` and `superseded`. Review any revoked association that was manual. The Discord worker retries partial role/nickname updates idempotently. If the announcement was interrupted after send started, verify the private thread before resetting that graduation job’s announcement checkpoint and rescheduling it. Never reissue the qualification solely to repair delivery.
 
 ## Staff views and imports
 
@@ -43,7 +43,7 @@ Review `vuscg_training_qualification_sync` and `vuscg_training_qualification_syn
 
 Set `TRAINING_FOLLOWUP_DAYS` to 1–365, default 30. At or above the threshold a recorded active enrollment is flagged for follow-up. Missing records, recent activity and paused enrollments have separate states. The all-slots-passed and MR-unawarded flag requires at least one configured lesson and conveys no graduation eligibility.
 
-Use a reviewed JSON array with one row per historical candidate, containing `source_id`, `pilot_id`, `qualification_id`, `tracker_label`, `flag`, `date` and `review`. Supply `program` for MR or another program-scoped qualification. The stable row ID and `--dataset` are used for idempotency. A reviewed `YES` can be staged; `NO` is ignored, and unclear mappings are reported. The uploader cannot award anything through the importer. A verified Discord reviewer uses `/qualification import candidate_id:… reason:…` and confirms the same grant workflow, including the IP restriction and MR graduation steps.
+Use a reviewed JSON array with one row per historical candidate, containing `source_id`, `pilot_id`, `qualification_id`, `tracker_label`, `flag`, `date` and `review`. Supply `program` for MR or another program-scoped qualification. The stable row ID and `--dataset` are used for idempotency. A reviewed `YES` can be staged; `NO` is ignored, and unclear mappings are reported. The uploader cannot award anything through the importer. A verified Discord reviewer uses `/qualification import candidate_id:… reason:…`. P05 records the import as historical, applying the same reviewer permissions. It creates no native delivery or graduation job. Any operational designation requires its own separately authorized decision and reconciliation.
 
 ```sh
 node scripts/import-qualifications.js --dataset log-2026 reviewed.json

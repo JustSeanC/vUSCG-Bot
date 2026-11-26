@@ -198,21 +198,10 @@ client.once('ready', () => {
     },
   });
 
-  // Run rank sync once on startup
-  try {
-    syncRanks(client, db, process.env.GUILD_ID);
-  } catch (e) {
-    console.error('❌ Rank sync failed on startup:', e);
-  }
-
-  // Run every hour
-  setInterval(() => {
-    try {
-      syncRanks(client, db, process.env.GUILD_ID);
-    } catch (e) {
-      console.error('❌ Rank sync failed on interval:', e);
-    }
-  }, 60 * 60 * 1000);
+  const runRankSync = () => syncRanks(client, db, process.env.GUILD_ID)
+    .catch(error => console.error('Rank sync failed:', error.code || error.name));
+  void runRankSync();
+  setInterval(runRankSync, 60 * 60 * 1000);
 });
 
 
@@ -238,21 +227,18 @@ client.on('interactionCreate', async interaction => {
       return interaction.reply({ content: 'PIREP review is available only in the configured vUSCG server.', ephemeral: true });
     }
 
-    const COMMAND_STAFF_ROLE_ID = process.env.COMMAND_STAFF_ROLE_ID;
-    const INSTRUCTOR_PILOT_ROLE_ID = process.env.INSTRUCTOR_PILOT_ROLE_ID;
-
-    const staff =
-      interaction.member ??
-      (await interaction.guild.members.fetch(interaction.user.id));
-
-    const hasRole = (roleId) => !!roleId && staff.roles.cache.has(roleId);
-
-    return handlePirepButton({
-      interaction,
-      db,
-      hasRole,
-      roles: { COMMAND_STAFF_ROLE_ID, INSTRUCTOR_PILOT_ROLE_ID },
-    });
+    try {
+      await handlePirepButton({
+        interaction, db,
+        roles: {
+          COMMAND_STAFF_ROLE_ID: process.env.COMMAND_STAFF_ROLE_ID,
+          INSTRUCTOR_PILOT_ROLE_ID: process.env.INSTRUCTOR_PILOT_ROLE_ID,
+        },
+      });
+    } catch (error) {
+      console.warn('PIREP review interaction failed:', error.code || error.name);
+    }
+    return;
   }
   if (!interaction.isChatInputCommand()) return;
 

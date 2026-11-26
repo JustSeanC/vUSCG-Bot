@@ -365,7 +365,40 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
     assert.equal(candidate.source.provenance.trackerLabel, 'IP');
     await assert.rejects(apply(context('instructor'), candidate), /require Command Staff/);
     const historical = await apply(context('command'), candidate);
-    assert.deepEqual(await targets(historical.id), ['award', 'ip_role']);
+    assert.deepEqual(await targets(historical.id), []);
+    await db.query("INSERT INTO users (id, pilot_id, name, flight_time) VALUES (51, 3251, 'Historical Pilot', 0)");
+    const [historicalMr] = await importQualifications(db, [{
+      ...file[0], source_id: 'historical-mr', pilot_id: 3251, qualification_id: 'mr', program: 'rw', tracker_label: 'MR',
+    }], { dataset: 'tracker', stage: true });
+    const historicalChange = await qualifications.preview(db, { candidateId: historicalMr.candidateId, reason: 'Evidence reviewed' });
+    assert.equal(historicalChange.graduateDiscordId, null);
+    assert.deepEqual(await targets((await apply(context('instructor'), historicalChange)).id), []);
+
+    const lost = context('instructor');
+    const lostChange = await qualifications.preview(db, { pilotId: 3251, qualification: 'dlq', action: 'grant', date: '2025-11-20' });
+    const actorBeforeLoss = await qualifications.authorize(lost, lostChange);
+    lost.db = {
+      query: db.query.bind(db), execute: db.execute.bind(db),
+      async getConnection() {
+        const connection = await db.getConnection();
+        const commit = connection.commit.bind(connection);
+        connection.commit = async () => {
+          connection.commit = commit;
+          await commit();
+          throw new Error('Commit response lost');
+        };
+        return connection;
+      },
+    };
+    const recovered = await qualifications.commitConfirmedChange(lost, lostChange, actorBeforeLoss);
+    assert.equal(recovered.created, false);
+    assert.deepEqual(await targets(recovered.id), ['award']);
+    const historyOnly = (await qualifications.history(db, pilot.id, 20, 0)).find(row => row.event_id === historical.id);
+    assert.equal(historyOnly.delivery, null);
+    assert.equal(historyOnly.provenance.sourceId, 'historical-ip');
+    const recordedDelivery = (await qualifications.history(db, pilot.id, 20, 0)).find(row => row.event_id === fw.id);
+    assert.ok(recordedDelivery.delivery.some(job => job.target === 'graduation' && job.state === 'pending'));
+    await assert.rejects(apply(reviewing, { ...revoke, reason: 'Changed after confirmation' }), /different qualification change/);
   });
 
   await t.test('dashboard paginates enrollments and separates dates, verified instructors, and imported activity', async () => {
@@ -483,6 +516,24 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
     assert.ok(roles.has(roleIds[event.program_id]) && roles.has(opposite) && roles.has('senior'));
     assert.ok(!roles.has(roleIds.cadet) && !roles.has(roleIds.o2));
     assert.equal(user.nickname, 'C3250 CDR Example P');
+  });
+
+
+  await t.test('reviewed migration order preserves CGAS state and read-only schema inventory executes', async () => {
+    const sql = relative => readFile(path.join(__dirname, '..', relative), 'utf8');
+    for (const file of ['001_cgas_tour.sql', '002_cgas_historical_announcements.sql', '003_cgas_phpvms_awards.sql']) {
+      await db.query(await sql('migrations/' + file));
+    }
+    await db.query(await sql('integrations/phpvms7/bridge-nonces.sql'));
+    await db.query(await sql('integrations/phpvms7/bridge-nonces.sql'));
+    const [inventory] = await db.query(await sql('integrations/phpvms7/training-schema-preflight.sql'));
+    assert.equal(inventory[1][0].selected_schema, 'vuscg_training_test');
+    assert.ok(inventory[2].some(row => row.TABLE_NAME === 'bot_cgas_completions'));
+    assert.ok(inventory[3].some(row => row.TABLE_NAME === 'bot_cgas_completions' && row.COLUMN_NAME === 'award_status'));
+    assert.ok(inventory[3].some(row => row.TABLE_NAME === 'user_awards' && row.COLUMN_NAME === 'vuscg_qualification_owner'));
+    assert.ok(inventory[5].some(row => row.CONSTRAINT_NAME === 'chk_training_qual_actor' && row.ENFORCED === 'YES'));
+    const [[count]] = await db.query('SELECT COUNT(*) AS count FROM bot_cgas_completions');
+    assert.equal(count.count, 0);
   });
 
 });

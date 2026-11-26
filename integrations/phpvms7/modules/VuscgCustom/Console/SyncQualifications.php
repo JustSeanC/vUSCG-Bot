@@ -39,27 +39,32 @@ final class SyncQualifications extends Command
         foreach ($jobs as $job) {
             $nativeId = null;
             try {
-                DB::transaction(function () use ($job, $settings, &$nativeId): void {
+                $roleCache = DB::transaction(function () use ($job, $settings, &$nativeId): ?array {
                     $queue = $this->queue($job)->lockForUpdate()->first();
                     if (!$this->due($queue)) {
-                        return;
+                        return null;
                     }
                     $event = DB::table('vuscg_training_qualification_events')->where('event_id', $job->event_id)->first();
+                    if ($event->candidate_id !== null) {
+                        $this->record($queue, 'historical_audit_only', null, false);
+                        return null;
+                    }
                     $mapping = Plan::target($event, $job->target, $settings);
                     $nativeId = $mapping['id'] ?? null;
                     $user = User::query()->whereKey($event->user_id)->lockForUpdate()->first();
                     if (!$user || $user->getConnection() !== DB::connection() || (string) $user->pilot_id !== (string) $event->public_pilot_id) {
                         throw new DomainException('pilot_mapping_changed');
                     }
-                    $scopes = DB::table('vuscg_training_qualification_status')
-                        ->where('user_id', $event->user_id)->where('qualification_id', $event->qualification_id)
-                        ->sharedLock()->get();
+                    $scopes = DB::table('vuscg_training_qualification_status as s')
+                        ->join('vuscg_training_qualification_events as e', 'e.event_id', '=', 's.last_event_id')
+                        ->where('s.user_id', $event->user_id)->where('s.qualification_id', $event->qualification_id)
+                        ->select('s.*', 'e.candidate_id')->sharedLock()->get();
                     $scope = $scopes->firstWhere('program_id', $event->program_id);
                     if (!$scope || $scope->last_event_id !== $event->event_id) {
                         $this->record($queue, 'superseded', $nativeId, false);
-                        return;
+                        return null;
                     }
-                    $desired = $scopes->contains(fn ($scope) => (bool) $scope->active);
+                    $desired = $scopes->contains(fn ($scope) => (bool) $scope->active && $scope->candidate_id === null);
                     $marker = Plan::marker($event, $job->target);
                     if ($job->target === 'type_rating') {
                         $desired = (bool) $scope->active;
@@ -69,15 +74,30 @@ final class SyncQualifications extends Command
                             throw new DomainException('awaiting_native_award');
                         }
                         [$result, $nativeId] = $this->syncRating($user, $mapping, $marker, $desired, $settings);
+                    } elseif ($job->target === 'award') {
+                        $result = $this->syncAward($user, $mapping, $marker, $desired);
                     } else {
-                        $result = $job->target === 'award'
-                            ? $this->syncAward($user, $mapping, $marker, $desired)
-                            : $this->syncRole($user, $mapping, $marker, $desired);
+                        $result = $this->syncRole($user, $mapping, $marker, $desired);
+                        // Leave the job due until cache invalidation succeeds after the native commit.
+                        $this->appendAttempt($queue, $result, $nativeId);
+                        return [$user, $result];
                     }
                     $this->record($queue, $result, $nativeId, false);
+                    return null;
                 });
+                if ($roleCache !== null) {
+                    [$user, $result] = $roleCache;
+                    $user->flushLaratrustCache();
+                    DB::transaction(function () use ($job, $result, $nativeId): void {
+                        $queue = $this->queue($job)->lockForUpdate()->first();
+                        if ($this->due($queue)) {
+                            $this->record($queue, $result, $nativeId, false);
+                        }
+                    });
+                }
             } catch (Throwable $error) {
-                $code = $error instanceof DomainException ? $error->getMessage() : 'native_database_or_model_error';
+                $code = $error instanceof DomainException && preg_match('/\A[a-z_]{1,60}\z/', $error->getMessage())
+                    ? $error->getMessage() : 'native_database_or_model_error';
                 DB::transaction(function () use ($job, $code, $nativeId): void {
                     $queue = $this->queue($job)->lockForUpdate()->first();
                     if ($this->due($queue)) {
@@ -109,6 +129,11 @@ final class SyncQualifications extends Command
             'attempts' => DB::raw('attempts + 1'),
             'next_attempt_at' => $retry ? DB::raw('DATE_ADD(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)') : DB::raw('UTC_TIMESTAMP()'),
         ]);
+        $this->appendAttempt($job, $result, $nativeId);
+    }
+
+    private function appendAttempt(object $job, string $result, ?string $nativeId): void
+    {
         DB::table('vuscg_training_qualification_sync_attempts')->insert([
             'event_id' => $job->event_id, 'target' => $job->target, 'native_id' => $nativeId,
             'result' => $result, 'created_at' => DB::raw('UTC_TIMESTAMP(6)'),
@@ -136,7 +161,8 @@ final class SyncQualifications extends Command
     private function syncRole(User $user, array $mapping, string $marker, bool $active): string
     {
         $roles = $user->roles();
-        if (config('laratrust.teams.enabled', false) || !$roles instanceof MorphToMany || $roles->getTable() !== 'role_user'
+        if (config('laratrust.teams.enabled', false) || !method_exists($user, 'flushLaratrustCache')
+            || !$roles instanceof MorphToMany || $roles->getTable() !== 'role_user'
             || $roles->getRelated()->getTable() !== 'roles' || $roles->getRelated()->getConnection() !== DB::connection()
             || $roles->getForeignPivotKeyName() !== 'user_id' || $roles->getRelatedPivotKeyName() !== 'role_id') {
             throw new DomainException('unsupported_role_relation');
@@ -147,13 +173,8 @@ final class SyncQualifications extends Command
         }
         $identity = ['user_id' => $user->id, 'role_id' => $role->id, $roles->getMorphType() => $roles->getMorphClass()];
 
-        $result = $this->syncAssociation('role_user', $identity, $marker, $active,
+        return $this->syncAssociation('role_user', $identity, $marker, $active,
             fn () => $roles->attach($role->id, ['vuscg_qualification_owner' => $marker]));
-        if (method_exists($user, 'flushLaratrustCache') && in_array($result, ['inserted', 'removed_managed'], true)) {
-            DB::afterCommit(fn () => $user->flushLaratrustCache());
-        }
-
-        return $result;
     }
 
     private function findRating(string $column, string $code): Typerating

@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use JsonException;
+use Modules\VuscgCustom\Services\PirepDecisionGate;
 
 class PirepReviewController
 {
@@ -78,9 +79,12 @@ class PirepReviewController
                 return $this->result('invalid', $id, null, 422);
             }
             $pirep = Pirep::query()->useWritePdo()->whereKey($id)->first();
-            return $pirep && $pirep->getKey() === $id
-                ? $this->result('status', $id, (int) $pirep->state)
-                : $this->result('not_found', $id, null, 404);
+            if (!$pirep || $pirep->getKey() !== $id) {
+                return $this->result('not_found', $id, null, 404);
+            }
+            return is_int($pirep->state)
+                ? $this->result('status', $id, $pirep->state)
+                : $this->result('disabled', $id, null, 503);
         }
 
         $action = $payload['action'] ?? null;
@@ -94,10 +98,15 @@ class PirepReviewController
             return $this->result('invalid', $id, null, 422);
         }
 
-        if (config('vuscg_pirep_review.decisions_enabled') !== true) {
+        // The deployed native writers have not been verified to share the bridge lock.
+        // Production writes require a future reviewed change after the writer audit.
+        if (!PirepDecisionGate::allows(app()->environment(), config('vuscg_pirep_review.decisions_enabled'))) {
             return $this->result('disabled', $id, null, 503);
         }
 
+        if (!is_int(PirepState::PENDING)) {
+            return $this->result('disabled', $id, null, 503);
+        }
         $target = $action === 'approve' ? PirepState::ACCEPTED : PirepState::REJECTED;
         [$code, $state, $status] = $connection->transaction(function () use ($id, $target) {
             $pirep = Pirep::query()->whereKey($id)->lockForUpdate()->first();
@@ -110,8 +119,14 @@ class PirepReviewController
             }
 
             // Serialize bridge updates that share a pilot or aircraft as well.
-            $pirep->user()->lockForUpdate()->firstOrFail();
-            $pirep->aircraft()->lockForUpdate()->firstOrFail();
+            $pilot = $pirep->user();
+            $aircraft = $pirep->aircraft();
+            if ($pilot->getRelated()->getConnection() !== $pirep->getConnection()
+                || $aircraft->getRelated()->getConnection() !== $pirep->getConnection()) {
+                throw new \RuntimeException('Native PIREP accounting models must share the primary connection.');
+            }
+            $pilot->lockForUpdate()->firstOrFail();
+            $aircraft->lockForUpdate()->firstOrFail();
 
             app(PirepService::class)->changeState($pirep, $target);
             $actual = $pirep->refresh()->state;

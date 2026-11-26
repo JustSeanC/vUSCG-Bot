@@ -51,6 +51,10 @@ async function showAwards(ctx, action) {
       item.candidate_id && `Reviewed source ${safe(item.provenance.dataset)}/${safe(item.provenance.sourceId)}`,
     ].filter(Boolean).join('\n');
     embed.addFields({ name: name.slice(0, 256), value: value.slice(0, 1024) });
+    if (!current && item.delivery?.length) {
+      embed.addFields({ name: 'Delivery', value: item.delivery.map(job =>
+        `${safe(job.target)} · ${safe(job.state)}${job.result ? ` · ${safe(job.result)}` : ''}`).join('\n') });
+    }
     if (item.reason) embed.addFields({ name: 'Audit reason', value: safe(item.reason) });
   }
   embed.setFooter({ text: `Page ${page}${rows.length > size ? ` · Use page:${page + 1} for more` : ''}` });
@@ -83,7 +87,7 @@ async function execute(ctx) {
       `Reviewer C${actor.pilotId}`,
       change.graduateDiscordId && `Graduation will queue native award, rating, rank, and Discord updates for verified Discord ID ${change.graduateDiscordId}.`,
       change.qualification === 'mr' && change.action === 'revoke' && 'Review existing rank and Discord roles separately. This revocation does not change them.',
-      change.source && `Historical source: ${safe(change.source.provenance.dataset)}/${safe(change.source.provenance.sourceId)}\nReview: ${safe(change.source.provenance.review)}`,
+      change.source && `Audit-only historical entry. Source: ${safe(change.source.provenance.dataset)}/${safe(change.source.provenance.sourceId)}\nReview: ${safe(change.source.provenance.review)}`,
       change.reason && `Reason: ${safe(change.reason)}`,
     ].filter(Boolean).join('\n'));
     if (!(await confirm(interaction, summary))) return;

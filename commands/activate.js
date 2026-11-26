@@ -107,11 +107,15 @@ const logActivationToRegistrationChannel = async ({
 
     try {
       // 1) Validate pilot exists in phpVMS
-      const [rows] = await db.query('SELECT name FROM users WHERE pilot_id = ?', [pilotId]);
+      const [rows] = await db.query('SELECT name, rank_id FROM users WHERE pilot_id = ?', [pilotId]);
       if (rows.length === 0) {
         return interaction.editReply({
           content: `❌ No user found with Pilot ID ${pilotId}`,
         });
+      }
+
+      if (Number(rows[0].rank_id) >= 13) {
+        return interaction.editReply({ content: 'This pilot already holds LTJG or a higher rank. Review their existing account link before making changes.' });
       }
 
       const fullName = rows[0].name.trim();
@@ -119,10 +123,7 @@ const logActivationToRegistrationChannel = async ({
       const lastInitial = lastParts.length ? lastParts[0][0].toUpperCase() : '';
       const nickname = `C${pilotId} ${firstName} ${lastInitial}`;
 
-      // 2) Update DB
-      await db.query('UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?', [1, 12, pilotId]);
-
-      // 3) Discord member updates (best-effort)
+      // Validate the Discord destination before changing the pilot record.
       let member;
       try {
         member = await interaction.guild.members.fetch(targetUser.id);
@@ -130,6 +131,23 @@ const logActivationToRegistrationChannel = async ({
         return interaction.editReply({
           content: `❌ Could not find that Discord user in this server. Make sure they have joined first.`,
         });
+      }
+
+      const trainingChannel = await interaction.guild.channels.fetch(trainingChannelId);
+      if (!trainingChannel?.threads) {
+        return interaction.editReply({ content: `❌ Could not find training channel (${trainingChannelId}).` });
+      }
+
+      const [links] = await db.query(`SELECT CAST(discord_id AS CHAR) AS discord_id, pilot_id
+        FROM discord_links WHERE discord_id = ? OR pilot_id = ?`, [targetUser.id, pilotId]);
+      if (links.some(link => link.discord_id !== targetUser.id || String(link.pilot_id) !== String(pilotId))) {
+        return interaction.editReply({ content: 'An existing Discord or pilot link conflicts with this request. Review the link before activation.' });
+      }
+
+      const [activation] = await db.query(`UPDATE users SET state = ?, rank_id = ? WHERE pilot_id = ?
+        AND (rank_id IS NULL OR rank_id < 13)`, [1, 12, pilotId]);
+      if (!activation.affectedRows) {
+        return interaction.editReply({ content: 'The pilot rank changed during activation. Review their account before proceeding.' });
       }
 
       try {
@@ -148,14 +166,6 @@ const logActivationToRegistrationChannel = async ({
         await member.roles.remove(GUEST_ROLE_ID);
       } catch (e) {
         console.warn('⚠️ Removing Guest role failed:', e?.message ?? e);
-      }
-
-      // 4) Create private thread
-      const trainingChannel = await interaction.guild.channels.fetch(trainingChannelId);
-      if (!trainingChannel) {
-        return interaction.editReply({
-          content: `❌ Could not find training channel (${trainingChannelId}).`,
-        });
       }
 
       // Link discord_id <-> pilot_id

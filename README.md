@@ -338,6 +338,10 @@ On startup (and then every hour), the bot runs rank sync:
 
 See the [P02 training guide](docs/training-p02.md) for enrollments and standalone signoffs, and the [P03 guide](docs/training-p03.md) for PIREP-linked signoffs and staging.
 
+## Training release readiness
+
+See the [P05 readiness report](docs/training-p05-readiness.md) and [deployment runbook](docs/training-deployment-runbook.md) before cutover.
+
 ## Test and deployment workflow
 
 From the bot checkout, review and deploy the feature branch normally (do not commit `.env`):

@@ -7,6 +7,7 @@ use App\Events\ProcessAward;
 use App\Events\UserStatsChanged;
 use App\Models\Pirep;
 use App\Services\PirepService;
+use Illuminate\Events\Dispatcher;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
@@ -108,6 +109,7 @@ class PirepReviewBridgeTest extends TestCase
             $pilot = $pirep->user;
             $aircraft = $pirep->aircraft;
             $pilotMinutes = (int) $pilot->flight_time;
+            $pilotFlights = (int) $pilot->flights;
             $aircraftMinutes = (int) $aircraft->flight_time;
             $payload = [
                 'pirep_id' => $id,
@@ -120,10 +122,76 @@ class PirepReviewBridgeTest extends TestCase
             $this->send('status', ['pirep_id' => $id])->assertOk()->assertJsonPath('state', 2);
 
             $this->assertSame($pilotMinutes + $minutes, (int) $pilot->fresh()->flight_time);
+            $this->assertSame($pilotFlights + 1, (int) $pilot->fresh()->flights);
             $this->assertSame($aircraftMinutes + $minutes, (int) $aircraft->fresh()->flight_time);
+            $this->assertSame((string) $pirep->arr_airport_id, (string) $pilot->fresh()->curr_airport_id);
+            $this->assertSame((string) $pirep->arr_airport_id, (string) $aircraft->fresh()->airport_id);
+            $this->assertSame((string) $pirep->id, (string) $pilot->fresh()->last_pirep_id);
             Event::assertDispatchedTimes(PirepAccepted::class, 1);
             Event::assertDispatchedTimes(ProcessAward::class, 1);
         } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_production_refuses_signed_writes_even_with_the_decision_flag_enabled(): void
+    {
+        $previous = app()->environment();
+        app()->instance('env', 'production');
+        config(['vuscg_pirep_review.decisions_enabled' => true]);
+        try {
+            $this->mock(PirepService::class)->shouldNotReceive('changeState');
+            $this->send('decision', [
+                'pirep_id' => $this->missingId,
+                'action' => 'approve',
+                'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => null],
+            ])->assertStatus(503)->assertJsonPath('code', 'disabled');
+        } finally {
+            app()->instance('env', $previous);
+        }
+    }
+
+    public function test_native_accounting_rolls_back_when_acceptance_throws(): void
+    {
+        $id = getenv('PIREP_BRIDGE_TEST_NATIVE_PENDING_ID');
+        if (!$id) {
+            $this->markTestSkipped('Requires an isolated native-accounting PIREP fixture.');
+        }
+
+        $connection = (new Pirep())->getConnection();
+        $originalDispatcher = Event::getFacadeRoot();
+        $isolated = new Dispatcher($this->app);
+        $seen = 0;
+        $isolated->listen(PirepAccepted::class, function () use (&$seen): void {
+            $seen++;
+            throw new \LogicException('Fixture failure after native accounting');
+        });
+        Event::swap($isolated);
+        $connection->beginTransaction();
+        try {
+            $this->withoutExceptionHandling();
+            config(['vuscg_pirep_review.decisions_enabled' => true]);
+            $report = Pirep::query()->findOrFail($id);
+            $this->assertSame(1, $report->state);
+            $pilot = $report->user;
+            $aircraft = $report->aircraft;
+            $pilotBefore = $pilot->getRawOriginal();
+            $aircraftBefore = $aircraft->getRawOriginal();
+            try {
+                $this->send('decision', [
+                    'pirep_id' => $id, 'action' => 'approve',
+                    'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => null],
+                ]);
+                $this->fail('Expected the injected synchronous listener to fail.');
+            } catch (\LogicException $exception) {
+                $this->assertSame('Fixture failure after native accounting', $exception->getMessage());
+            }
+            $this->assertSame(1, $seen);
+            $this->assertSame(1, $report->fresh()->state);
+            $this->assertSame($pilotBefore, $pilot->fresh()->getRawOriginal());
+            $this->assertSame($aircraftBefore, $aircraft->fresh()->getRawOriginal());
+        } finally {
+            Event::swap($originalDispatcher);
             $connection->rollBack();
         }
     }

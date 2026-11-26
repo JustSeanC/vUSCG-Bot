@@ -86,6 +86,7 @@ async function announce(db, guild, job, pilot) {
 }
 
 async function graduate(db, client, guildId, job) {
+  if (job.candidate_id !== null) return 'historical_audit_only';
   if (job.action !== 'grant' || job.qualification_id !== 'mr' || !['rw', 'fw'].includes(job.program_id) ||
       !['command_staff', 'instructor_pilot'].includes(job.reviewer_role)) throw new Error('invalid_graduation_event');
   let pilot = await currentPilot(db, job);

@@ -251,30 +251,25 @@ function startPendingPirepWatcher(opts) {
 }
 
 async function handlePirepButton(ctx) {
-  const { interaction, db, hasRole, roles, bridge = createPirepBridge() } = ctx;
-
-  const allowed =
-    hasRole(roles.INSTRUCTOR_PILOT_ROLE_ID) || hasRole(roles.COMMAND_STAFF_ROLE_ID);
-
-  if (!allowed) {
-    return interaction.reply({
-      content: '❌ You do not have permission to review PIREPs.',
-      ephemeral: true,
-    });
-  }
-
-  const parts = String(interaction.customId || '').split(':');
-  const [, action, pirepId] = parts;
-  if (parts.length !== 3 || !validPirepId(pirepId) || !['approve', 'reject'].includes(action)) {
-    return interaction.reply({ content: '❌ Invalid PIREP action.', ephemeral: true });
+  const { interaction, db, roles, bridge = createPirepBridge() } = ctx;
+  const reply = content => interaction.reply({ content, ephemeral: true });
+  const [, action, pirepId, ...extra] = String(interaction.customId || '').split(':');
+  const footer = interaction.message.embeds?.[0]?.footer?.text;
+  if (extra.length || !validPirepId(pirepId) || !['approve', 'reject'].includes(action) ||
+      !interaction.client.user?.id || interaction.message.author?.id !== interaction.client.user.id ||
+      !(footer === `PIREP: ${pirepId}` || footer?.startsWith(`PIREP: ${pirepId} • Reviewed by `))) {
+    return reply('❌ This review button is unavailable or does not match its PIREP.');
   }
 
   await interaction.deferUpdate();
+  const member = await interaction.guild.members.fetch({ user: interaction.user.id, force: true }).catch(() => null);
+  if (!member || ![roles.INSTRUCTOR_PILOT_ROLE_ID, roles.COMMAND_STAFF_ROLE_ID].some(id => id && member.roles.cache.has(id))) {
+    return interaction.followUp({ content: '❌ Your permission to review PIREPs could not be verified.', ephemeral: true });
+  }
   const reviewer = { discord_id: interaction.user.id, pilot_number: null };
   try {
-    const [links] = await db.query(
-      'SELECT pilot_id FROM discord_links WHERE discord_id = ? LIMIT 1', [reviewer.discord_id]
-    );
+    const [links] = await db.query(`SELECT u.pilot_id FROM discord_links d
+      JOIN users u ON u.pilot_id = d.pilot_id WHERE d.discord_id = ? LIMIT 1`, [reviewer.discord_id]);
     const pilotId = String(links[0]?.pilot_id ?? '');
     if (/^[0-9]{1,15}$/.test(pilotId)) reviewer.pilot_number = 'C' + pilotId;
   } catch {
@@ -289,6 +284,7 @@ async function handlePirepButton(ctx) {
       invalid: 'The bridge rejected the PIREP ID or request.',
       unauthorized: 'The bridge rejected authentication.',
       busy: 'The bridge is rate limiting requests.',
+      disabled: 'Approval through Discord is disabled.',
       reconciled: 'The PIREP was still pending at the last check. The original request may still be running.',
     }[result.code] ?? 'The bridge is unavailable or the outcome could not be confirmed.';
     return interaction.followUp({

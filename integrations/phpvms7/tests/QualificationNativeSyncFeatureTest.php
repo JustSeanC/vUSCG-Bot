@@ -34,6 +34,11 @@ final class QualificationNativeSyncFeatureTest extends TestCase
         try {
             $this->assertFalse($pivot()->exists(), 'Use a new staging pilot without this native award.');
             $grant = $this->event('dlq', 'grant', 'award');
+            config(['vuscg_qualifications.enabled' => false]);
+            $this->sync($grant);
+            $this->assertFalse($pivot()->exists());
+            $this->assertDatabaseHas('vuscg_training_qualification_sync', ['event_id' => $grant, 'state' => 'pending']);
+            config(['vuscg_qualifications.enabled' => true]);
             $this->sync($grant);
             $this->sync($grant);
             $this->assertSame(1, $pivot()->count());
