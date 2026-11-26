@@ -1,28 +1,24 @@
 const fs = require('fs');
+const { createHash } = require('node:crypto');
 const { createPirepBridge, validPirepId } = require('./pirepBridge');
+const { PIREP_STATE, reportUrl, readReport, reportState } = require('./pirepEvidence');
+const { postToTrainingThread } = require('./training/threads');
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const CACHE_PATH = './pending_pireps_cache.json';
 
-// PIREP state meanings (your mapping)
-const PIREP_STATE = {
-  PENDING: 1,
-  ACCEPTED: 2,
-  DELETED: 4,
-  REJECTED: 6,
-};
-
 function loadCache() {
   try {
-    return JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
+    return Object.assign(Object.create(null), JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8')));
   } catch {
-    return {};
+    return Object.create(null);
   }
 }
 
 function saveCache(obj) {
   try {
-    fs.writeFileSync(CACHE_PATH, JSON.stringify(obj, null, 2));
+    fs.writeFileSync(CACHE_PATH + '.tmp', JSON.stringify(obj, null, 2));
+    fs.renameSync(CACHE_PATH + '.tmp', CACHE_PATH);
   } catch (e) {
     console.warn('⚠️ Could not write pending PIREP cache:', e?.message ?? e);
   }
@@ -59,46 +55,6 @@ function pirepStateLabel(state) {
     }[s] || `State ${s}`
   );
 }
-
-async function findTrainingThread(trainingChannel, threadName) {
-  // 1) Active threads
-  try {
-    const active = await trainingChannel.threads.fetchActive();
-    const found = active.threads.find(t => t.name === threadName);
-    if (found) return found;
-  } catch {
-    // ignore
-  }
-
-  // 2) Archived PUBLIC threads
-  try {
-    const archivedPublic = await trainingChannel.threads.fetchArchived({
-      limit: 100,
-      type: 'public',
-    });
-    const found = archivedPublic.threads.find(t => t.name === threadName);
-    if (found) return found;
-  } catch {
-    // ignore
-  }
-
-  // 3) Archived PRIVATE threads (this is the important one for your use case)
-  try {
-    const archivedPrivate = await trainingChannel.threads.fetchArchived({
-      limit: 100,
-      type: 'private',
-    });
-    const found = archivedPrivate.threads.find(t => t.name === threadName);
-    if (found) return found;
-  } catch {
-    // ignore (missing perms, etc.)
-  }
-
-  return null;
-}
-
-
-
 
 function buildPendingEmbed(rec, pirepUrl, vatsimStatsUrl) {
   const pilotLine = `**C${rec.pilot_id}** — ${rec.pilot_name || 'Unknown Name'}`;
@@ -164,7 +120,8 @@ async function fetchPendingPireps(db) {
       u.pilot_id,
       u.name AS pilot_name,
 
-      dl.discord_id,
+      (SELECT IF(COUNT(*) = 1, MIN(dl.discord_id), NULL)
+         FROM discord_links dl WHERE dl.pilot_id = u.pilot_id) AS discord_id,
 
       ufv.value AS vatsim_cid,
 
@@ -179,14 +136,11 @@ async function fetchPendingPireps(db) {
     LEFT JOIN aircraft a
       ON a.id = p.aircraft_id
 
-    LEFT JOIN discord_links dl
-      ON dl.pilot_id = u.pilot_id
-
     LEFT JOIN user_field_values ufv
       ON ufv.user_id = u.id
      AND ufv.user_field_id = 1
 
-    WHERE p.state = ?
+    WHERE p.state = ? AND p.deleted_at IS NULL
     ORDER BY p.submitted_at DESC
     LIMIT 50
   `;
@@ -196,159 +150,104 @@ async function fetchPendingPireps(db) {
 }
 
 
-async function reconcileCache({ client, db, cache }) {
-  // For anything we previously posted, if state is no longer pending, mark it resolved & remove buttons
-  const ids = Object.keys(cache);
-  if (!ids.length) return;
+function resolvedMessage(message, id, state, baseUrl, reviewer) {
+  const title = `PIREP Resolved — ${pirepStateLabel(state)}`;
+  const original = message.embeds?.[0];
+  const embed = EmbedBuilder.from(original ?? new EmbedBuilder()).setTitle(title)
+    .setColor(state === PIREP_STATE.ACCEPTED ? 0x2ecc71 : 0xe74c3c);
+  const footer = original?.title === title ? original.footer?.text : null;
+  embed.setFooter({ text: reviewer ? `PIREP: ${id} • Reviewed by ${reviewer}` : footer || `PIREP: ${id}` });
 
-  for (const pirepId of ids) {
-    const entry = cache[pirepId];
-    if (!entry?.channelId || !entry?.messageId) {
-      delete cache[pirepId];
+  const row = new ActionRowBuilder();
+  if (state === PIREP_STATE.ACCEPTED) row.addComponents(
+    new ButtonBuilder().setCustomId(`pirep-training:${id}`).setLabel('Record Training').setStyle(ButtonStyle.Primary)
+  );
+  const url = reportUrl(id, baseUrl);
+  if (url) row.addComponents(new ButtonBuilder().setLabel('View').setStyle(ButtonStyle.Link).setURL(url));
+  return { embeds: [embed], components: row.components.length ? [row] : [], allowedMentions: { parse: [] } };
+}
+
+async function reconcileCache({ client, db, cache, pirepBaseUrl }) {
+  for (const [id, entry] of Object.entries(cache)) {
+    if (!validPirepId(id) || !entry?.channelId || !entry?.messageId) {
+      delete cache[id];
       continue;
     }
-
     try {
-      const [rows] = await db.query('SELECT state FROM pireps WHERE id = ? LIMIT 1', [pirepId]);
-      if (!rows.length) {
-        // PIREP missing; drop cache
-        delete cache[pirepId];
-        continue;
-      }
-
-      const state = Number(rows[0].state);
+      const state = reportState(await readReport(db, id));
       if (state === PIREP_STATE.PENDING) continue;
-
-      // Fetch message and edit to resolved
-      const ch = await client.channels.fetch(entry.channelId);
-      const msg = await ch.messages.fetch(entry.messageId);
-
-      const resolvedEmbed = EmbedBuilder.from(msg.embeds?.[0] ?? new EmbedBuilder())
-        .setTitle(`✅ PIREP Resolved — ${pirepStateLabel(state)}`)
-        .setColor(state === PIREP_STATE.ACCEPTED ? 0x2ecc71 : 0xe74c3c);
-
-      await msg.edit({ embeds: [resolvedEmbed], components: [] });
-      delete cache[pirepId];
-
-    } catch (e) {
-      // If we can’t edit it (missing perms, deleted thread, etc.), stop retrying forever
-      console.warn(`⚠️ Could not reconcile posted PIREP ${pirepId}:`, e?.message ?? e);
-      delete cache[pirepId];
+      const channel = await client.channels.fetch(entry.channelId);
+      const message = await channel.messages.fetch(entry.messageId);
+      await message.edit(resolvedMessage(message, id, state, pirepBaseUrl));
+      delete cache[id];
+      saveCache(cache);
+    } catch (error) {
+      // A retry after a transient error or restart edits the same message.
+      if ([10003, 10008].includes(error.code)) delete cache[id];
+      else console.warn('Could not reconcile a PIREP review:', error.code || error.name);
     }
   }
 }
 
 async function tickWatcher(opts) {
-  const {
-    client,
-    db,
-    guildId,
-    trainingChannelId,
-    pirepBaseUrl,
-    vatsimStatsBaseUrl,
-    fallbackChannelId,
-  } = opts;
-
+  const { client, db, guildId, trainingChannelId, pirepBaseUrl, vatsimStatsBaseUrl, fallbackChannelId } = opts;
   const cache = loadCache();
-
-  // First reconcile anything already posted that’s no longer pending
-  await reconcileCache({ client, db, cache });
+  await reconcileCache({ client, db, cache, pirepBaseUrl });
+  saveCache(cache);
 
   const pending = await fetchPendingPireps(db);
-
-  // Resolve guild + training channel
-  const guild =
-    (guildId && (await client.guilds.fetch(guildId).catch(() => null))) ||
-    client.guilds.cache.first();
-
-  if (!guild) {
-    saveCache(cache);
-    return;
-  }
-
-  const trainingChannel = await guild.channels.fetch(trainingChannelId).catch(() => null);
+  const guild = guildId ? await client.guilds.fetch(guildId).catch(() => null) : client.guilds.cache.first();
+  if (!guild) return;
+  const parent = await guild.channels.fetch(trainingChannelId).catch(() => null);
 
   for (const rec of pending) {
-    const pirepId = String(rec.pirep_id);
+    const id = String(rec.pirep_id);
+    const url = reportUrl(id, pirepBaseUrl);
+    if (!url || cache[id]) continue;
 
-    // already posted
-    if (cache[pirepId]) continue;
-
-    const pilotId = rec.pilot_id;
-    const threadName = `Training Case for C${pilotId}`;
-
-    const pirepUrl = `${pirepBaseUrl.replace(/\/$/, '')}/${pirepId}`;
-
-    const cidRaw = (rec.vatsim_cid || '').trim();
-    const cidForStats = /^\d{6,8}$/.test(cidRaw) ? cidRaw : null;
-
-    const vatsimStatsUrl = cidForStats
-      ? `${vatsimStatsBaseUrl.replace(/\/$/, '')}/${cidForStats}`
-      : null;
-
-    const embed = buildPendingEmbed(rec, pirepUrl, vatsimStatsUrl);
-    const row = buildButtons(pirepId, pirepUrl);
-
-    let posted = false;
-
-    // Prefer trainee’s training thread
-    if (trainingChannel && trainingChannel.threads) {
-      const thread = await findTrainingThread(trainingChannel, threadName);
-
-      if (thread) {
-        // Unarchive if needed
-        if (thread.archived) {
-          try {
-            await thread.setArchived(false, 'Posting pending PIREP for review');
-          } catch (e) {
-            console.warn(`⚠️ Could not unarchive thread "${thread.name}":`, e?.message ?? e);
-          }
-        }
-
-        // If it's locked, you can't send
-        if (!thread.locked) {
-          try {
-            const msg = await thread.send({
-              content: `IPs: trainee filed a PIREP that needs review.`,
-              embeds: [embed],
-              components: [row],
-            });
-
-            cache[pirepId] = { channelId: thread.id, messageId: msg.id };
-            posted = true;
-          } catch (e) {
-            console.warn(`⚠️ Could not post to thread "${thread.name}":`, e?.message ?? e);
-          }
-        } else {
-          console.warn(`⚠️ Thread is locked, cannot post: "${thread.name}"`);
-        }
-      }
+    const cid = (rec.vatsim_cid || '').trim();
+    const stats = /^\d{6,8}$/.test(cid) ? `${vatsimStatsBaseUrl.replace(/\/$/, '')}/${cid}` : null;
+    const nonce = createHash('sha256').update('pirep-review:' + id).digest('hex').slice(0, 25);
+    const payload = {
+      embeds: [buildPendingEmbed(rec, url, stats)], components: [buildButtons(id, url)], nonce, enforceNonce: true,
+    };
+    let message;
+    try {
+      message = await postToTrainingThread(parent, { pilotId: rec.pilot_id, discordId: rec.discord_id }, {
+        ...payload, content: 'IPs: trainee filed a PIREP that needs review.',
+      });
+    } catch (error) {
+      // A send with an uncertain result must not also post to the fallback channel.
+      console.warn('Could not post a PIREP review in its training thread:', error.code || error.name);
+      continue;
     }
-
-    // Fallback channel if no thread found (or couldn't post)
-    if (!posted && fallbackChannelId) {
-      const fallback = await guild.channels.fetch(fallbackChannelId).catch(() => null);
-      if (fallback && fallback.isTextBased()) {
-        const msg = await fallback.send({ embeds: [embed], components: [row] });
-        cache[pirepId] = { channelId: fallback.id, messageId: msg.id };
-      }
+    if (!message && fallbackChannelId) {
+      const channel = await guild.channels.fetch(fallbackChannelId).catch(() => null);
+      if (channel?.isTextBased()) message = await channel.send({ ...payload, allowedMentions: { parse: [] } });
+    }
+    if (message) {
+      cache[id] = { channelId: message.channelId ?? message.channel?.id, messageId: message.id };
+      saveCache(cache);
     }
   }
-
-  // ✅ Save once per tick, not once per PIREP
-  saveCache(cache);
 }
-
 
 function startPendingPirepWatcher(opts) {
   const pollSeconds = Math.max(30, Number(opts.pollSeconds || 60));
-
-  // Run once immediately, then interval
-  tickWatcher(opts).catch(e => console.warn('⚠️ Pending PIREP watcher tick failed:', e?.message ?? e));
-
-  setInterval(() => {
-    tickWatcher(opts).catch(e => console.warn('⚠️ Pending PIREP watcher tick failed:', e?.message ?? e));
-  }, pollSeconds * 1000);
+  let running = false;
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      await tickWatcher(opts);
+    } catch (error) {
+      console.warn('Pending PIREP watcher tick failed:', error.code || error.name);
+    } finally {
+      running = false;
+    }
+  }
+  void tick();
+  setInterval(tick, pollSeconds * 1000);
 }
 
 async function handlePirepButton(ctx) {
@@ -398,30 +297,24 @@ async function handlePirepButton(ctx) {
     });
   }
 
-  const updatedEmbed = EmbedBuilder.from(interaction.message.embeds?.[0] ?? new EmbedBuilder())
-    .setTitle(`PIREP Resolved — ${pirepStateLabel(result.state)}`)
-    .setColor(result.state === PIREP_STATE.ACCEPTED ? 0x2ecc71 : 0xe74c3c)
-    .setFooter({ text: result.code === 'changed'
-      ? `PIREP: ${pirepId} • Reviewed by ${interaction.user.tag}`
-      : `PIREP: ${pirepId}` });
-
+  let state = result.state;
   try {
-    await interaction.editReply({ embeds: [updatedEmbed], components: [] });
+    if (state === PIREP_STATE.ACCEPTED) {
+      state = reportState(await readReport(db, pirepId));
+      if (state === PIREP_STATE.PENDING) throw new Error('Acceptance is not yet visible in the bot database');
+    }
+    const reviewer = result.code === 'changed' && state === result.state ? interaction.user.tag : null;
+    await interaction.editReply(resolvedMessage(interaction.message, pirepId, state, undefined, reviewer));
   } catch {
     return interaction.followUp({
-      content: `phpVMS confirmed the PIREP is ${pirepStateLabel(result.state)}, but the Discord message could not be updated.`,
+      content: `phpVMS reported ${pirepStateLabel(result.state)}. The review message will reconcile once the persisted state can be shown.`,
       ephemeral: true,
     });
-  }
-
-  const cache = loadCache();
-  if (cache[pirepId]) {
-    delete cache[pirepId];
-    saveCache(cache);
   }
 }
 
 module.exports = {
   startPendingPirepWatcher,
   handlePirepButton,
+  tickWatcher,
 };

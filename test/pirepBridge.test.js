@@ -1,9 +1,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { createHmac } = require('node:crypto');
+const { Collection, ChannelType } = require('discord.js');
 const { Response } = require('node-fetch');
 const { createPirepBridge } = require('../utils/pirepBridge');
-const { handlePirepButton, startPendingPirepWatcher } = require('../utils/pendingPireps');
+const { handlePirepButton, tickWatcher } = require('../utils/pendingPireps');
 
 const id = 'AbC-123';
 const reviewer = { discord_id: '123456789012345678', pilot_number: 'C121' };
@@ -129,7 +130,7 @@ test('confirmed denial removes Discord buttons even if the reviewer clicked appr
   assert.deepEqual(context.calls.map(([call]) => call), ['defer', 'decision', 'edit']);
   const message = context.calls[2][1];
   assert.match(message.embeds[0].data.title, /Rejected/);
-  assert.deepEqual(message.components, []);
+  assert.deepEqual(message.components[0].toJSON().components.map(button => button.label), ['View']);
   assert.doesNotMatch(message.embeds[0].data.footer.text, /Reviewed by/);
 });
 
@@ -146,29 +147,100 @@ test('pending watcher still posts Approve, Deny, and View in the trainee thread'
   let message;
   t.mock.method(fs, 'readFileSync', () => '{}');
   t.mock.method(fs, 'writeFileSync', (path, contents) => { cache = JSON.parse(contents); });
-  t.mock.method(global, 'setInterval', () => {});
+  t.mock.method(fs, 'renameSync', () => {});
   const thread = {
-    id: 'thread',
+    id: 'thread', parentId: 'training', type: ChannelType.PrivateThread,
+    members: { fetch: async () => true },
     name: 'Training Case for C121',
-    send: async payload => { message = payload; return { id: 'message' }; },
+    send: async payload => { message = payload; return { id: 'message', channelId: 'thread' }; },
   };
   const guild = {
     channels: { fetch: async () => ({
-      threads: { fetchActive: async () => ({ threads: [thread] }) },
+      id: 'training',
+      threads: {
+        fetchActive: async () => ({ threads: new Collection([[thread.id, thread]]) }),
+        fetchArchived: async () => ({ threads: new Collection(), hasMore: false }),
+      },
     }) },
   };
-  startPendingPirepWatcher({
+  await tickWatcher({
     client: { guilds: { fetch: async () => guild } },
     db: { query: async (sql, params) => {
       assert.match(sql, /WHERE p\.state =/);
       assert.deepEqual(params, [1]);
-      return [[{ pirep_id: id, pilot_id: 121, dpt_airport_id: 'KAST', arr_airport_id: 'KACV' }]];
+      return [[{ pirep_id: id, pilot_id: 121, discord_id: reviewer.discord_id, dpt_airport_id: 'KAST', arr_airport_id: 'KACV' }]];
     } },
     guildId: 'guild',
     trainingChannelId: 'training',
     pirepBaseUrl: 'https://example.test/pireps',
   });
-  await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(message.components[0].toJSON().components.map(button => button.label), ['Approve', 'Deny', 'View']);
   assert.deepEqual(cache, { [id]: { channelId: 'thread', messageId: 'message' } });
+});
+
+test('optional training action follows a persisted acceptance without replaying flight credit', async () => {
+  let flightMinutes = 300;
+  let state = 1;
+  const bridge = client(async () => {
+    // Model the bridge contract. Native Laravel accounting is exercised on the staging installation.
+    if (state === 2) return reply(409, 'not_pending', state);
+    state = 2;
+    flightMinutes += 45;
+    return reply(200, 'changed', state);
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const context = interactionContext(true, {});
+    context.bridge = bridge;
+    context.db.execute = async (sql, params) => {
+      assert.match(sql, /^SELECT p.id/);
+      assert.deepEqual(params, [id]);
+      return [[{ id, state, deleted_at: null }]];
+    };
+    await handlePirepButton(context);
+    const [, payload] = context.calls.at(-1);
+    assert.deepEqual(payload.components[0].toJSON().components.map(button => button.label), ['Record Training', 'View']);
+    assert.match(payload.embeds[0].data.title, /Approved/);
+  }
+  // Neither approval, displaying the button, nor the second approval creates a signoff or adds more credit.
+  assert.equal(flightMinutes, 345);
+});
+
+test('accepted bridge response with a deleted report keeps the signoff action unavailable', async () => {
+  const context = interactionContext(true, { code: 'not_pending', state: 2 });
+  context.db.execute = async () => [[{ id, state: 2, deleted_at: '2025-01-01' }]];
+  await handlePirepButton(context);
+  const [, payload] = context.calls.at(-1);
+  assert.deepEqual(payload.components[0].toJSON().components.map(button => button.label), ['View']);
+  assert.match(payload.embeds[0].data.title, /Deleted/);
+});
+
+test('watcher restart retries incomplete external resolution without creating new messages', async t => {
+  const fs = require('node:fs');
+  const ids = [id, 'Rest-654'];
+  let persisted = JSON.stringify(Object.fromEntries(ids.map(report => [report, { channelId: 'thread', messageId: report }])));
+  t.mock.method(fs, 'readFileSync', () => persisted);
+  t.mock.method(fs, 'writeFileSync', (_, contents) => { persisted = contents; });
+  t.mock.method(fs, 'renameSync', () => {});
+  t.mock.method(console, 'warn', () => {});
+  const edits = [];
+  let firstFailure = true;
+  const channel = { messages: { fetch: async report => ({ edit: async payload => {
+    if (report === id && firstFailure) {
+      firstFailure = false;
+      throw new Error('Discord timeout');
+    }
+    edits.push([report, payload.components[0].toJSON().components.map(button => button.label)]);
+  } }) } };
+  const options = {
+    client: { channels: { fetch: async () => channel }, guilds: { fetch: async () => null } },
+    db: { execute: async (_, [report]) => [[{ id: report, state: report === id ? 2 : 6, deleted_at: null }]],
+      query: async () => [[]] },
+    guildId: 'staging',
+  };
+  await tickWatcher(options);
+  assert.deepEqual(Object.keys(JSON.parse(persisted)), [id]);
+  await tickWatcher(options);
+  await tickWatcher(options);
+  assert.deepEqual(edits, [['Rest-654', ['View']], [id, ['Record Training', 'View']]]);
+  assert.deepEqual(JSON.parse(persisted), {});
 });

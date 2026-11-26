@@ -15,6 +15,7 @@ const lesson = { name: 'Flight 4', program_name: 'Rotary Wing' };
 test('training slash definition exposes the six authorized workflows', () => {
   const definition = require('../commands').training.definition.toJSON();
   assert.equal(definition.name, 'training');
+  assert.equal(definition.options[0].options.find(option => option.name === 'pirep_id').required, false);
   assert.deepEqual(definition.options.map(({ name }) => name), ['record', 'progress', 'pilot', 'history', 'enroll', 'void']);
   assert.equal(command.canUse('enroll', true, id => id === 'command', roles), true);
   assert.equal(command.canUse('void', true, id => id === 'instructor', roles), false);
@@ -184,20 +185,26 @@ test('missing training tables produce an ephemeral setup error without SQL detai
 
 test('thread notifications verify privacy and the linked trainee, and omit comments', async () => {
   const delivered = [];
-  const makeThread = type => ({
-    type, parentId: 'parent', name: 'Training Case for C3250',
+  const makeThread = (id, type) => ({
+    id, type, parentId: 'parent', name: 'Training Case for C3250',
     members: { fetch: async ({ member }) => member === '3250-discord' },
-    send: async payload => delivered.push(payload),
+    send: async payload => { delivered.push(payload); return { id: 'message' }; },
   });
-  const threads = new Collection([['private', makeThread(ChannelType.PrivateThread)], ['public', makeThread(ChannelType.PublicThread)]]);
-  const guild = { channels: { fetch: async () => ({ threads: { fetchActive: async () => ({ threads }) } }) } };
+  const threads = new Collection([['private', makeThread('private', ChannelType.PrivateThread)], ['public', makeThread('public', ChannelType.PublicThread)]]);
+  const guild = { channels: { fetch: async () => ({
+    id: 'parent',
+    threads: {
+      fetchActive: async () => ({ threads }),
+      fetchArchived: async () => ({ threads: new Collection() }),
+    },
+  }) } };
   const update = { pilot, lesson, data, actor: { pilotId: 3 }, traineeDiscordId: '3250-discord' };
   assert.equal(await postTrainingUpdate(guild, update, 'parent'), true);
   assert.equal(delivered.length, 1);
   assert.doesNotMatch(delivered[0].content, /Private notes/);
   assert.deepEqual(delivered[0].allowedMentions.parse, []);
   assert.equal(await postTrainingUpdate(guild, { ...update, traineeDiscordId: 'unrelated' }, 'parent'), false);
-  threads.set('duplicate-private', makeThread(ChannelType.PrivateThread));
+  threads.set('duplicate-private', makeThread('duplicate-private', ChannelType.PrivateThread));
   assert.equal(await postTrainingUpdate(guild, update, 'parent'), false);
   assert.equal(delivered.length, 1);
 });
@@ -220,4 +227,27 @@ test('Command Staff must explicitly confirm a void and uses their verified ident
   await command.execute(ctx);
   assert.equal(voided.mock.calls.length, 1);
   assert.match(log.at(-1)[1].content, /voided.*0\/1 configured lessons passed/);
+}));
+
+
+test('slash signoff passes the selected pilot and report through the shared linked workflow', t => withGuild(async () => {
+  const report = 'Accepted-42';
+  t.mock.method(service, 'linkedPilot', async () => ({ id: 50, pilot_id: 3 }));
+  t.mock.method(service, 'previewEvaluation', async (_, pilotId, input) => {
+    assert.equal(pilotId, 3250);
+    assert.equal(input.pirepId, report);
+    return { pilot, lesson, data: { ...data, pirepId: report } };
+  });
+  const create = t.mock.method(service, 'createRecord', async (_, record) => {
+    assert.equal(record.source, 'pirep');
+    assert.equal(record.pirepId, report);
+    return { created: false, recordId: 'already-saved' };
+  });
+  t.mock.method(service, 'progress', async () => []);
+  const { ctx, log } = context({ action: 'record', role: 'instructor' });
+  const original = ctx.interaction.options.getString;
+  ctx.interaction.options.getString = name => name === 'pirep_id' ? report : original(name);
+  await command.execute(ctx);
+  assert.equal(create.mock.calls.length, 1);
+  assert.match(log.at(-1)[1].content, /already-saved/);
 }));

@@ -1,4 +1,6 @@
 const { createHash, randomUUID } = require('node:crypto');
+const { validPirepId } = require('../pirepBridge');
+const { readReport, reportState, PIREP_STATE } = require('../pirepEvidence');
 const { resolvePilot } = require('../pilotStats');
 const { TrainingError, pilotNumber, code, snowflake, recordId, text, evaluation } = require('./validation');
 
@@ -52,10 +54,10 @@ async function getProgram(db, programId) {
   return program;
 }
 
-async function getLesson(db, programId, lessonId) {
+async function getLesson(db, programId, lessonId, lock = false) {
   const lesson = await first(db, `SELECT l.name, p.name AS program_name FROM vuscg_training_lessons l
     JOIN vuscg_training_programs p USING (program_id)
-    WHERE l.program_id = ? AND l.lesson_id = ? AND l.active = TRUE AND p.enabled = TRUE`, [programId, lessonId]);
+    WHERE l.program_id = ? AND l.lesson_id = ? AND l.active = TRUE AND p.enabled = TRUE${lock ? ' FOR SHARE' : ''}`, [programId, lessonId]);
   if (!lesson) throw new TrainingError('That lesson is unavailable in the selected training program.');
   return lesson;
 }
@@ -69,9 +71,24 @@ function checkEnrollment(enrollment) {
   if (!enrollment?.active) throw new TrainingError('This pilot needs an active enrollment in that program. Ask Command Staff to use /training enroll.');
 }
 
+async function acceptedPilot(db, id, expected, lock = false) {
+  if (!validPirepId(id)) throw new TrainingError('Enter a valid PIREP ID.');
+  const report = await readReport(db, id, { lock });
+  if (!report || report.deleted_at != null) throw new TrainingError('That PIREP is missing or was deleted.');
+  if (reportState(report) !== PIREP_STATE.ACCEPTED) throw new TrainingError('Only an accepted PIREP can be linked to training.');
+  if (!report.user_id || !report.pilot_id) throw new TrainingError('The PIREP has no valid phpVMS pilot.');
+  if (expected && (String(expected.id) !== report.user_id || String(expected.pilot_id) !== String(report.pilot_id))) {
+    throw new TrainingError('That PIREP belongs to a different pilot or its pilot mapping has changed.');
+  }
+  return { id: report.user_id, pilot_id: report.pilot_id, name: report.name };
+}
+
 async function previewEvaluation(db, pilotId, input) {
   const data = evaluation(input);
-  const pilot = await findPilot(db, pilotId);
+  const pirepId = input.pirepId ?? null;
+  const pilot = pilotId == null && pirepId ? await acceptedPilot(db, pirepId) : await findPilot(db, pilotId);
+  if (pirepId !== null && pilotId != null) await acceptedPilot(db, pirepId, pilot);
+  data.pirepId = pirepId;
   const lesson = await getLesson(db, data.programId, data.lessonId);
   checkEnrollment(await booking(db, pilot.id, data.programId));
   return { pilot, lesson, data };
@@ -105,17 +122,17 @@ function prepareRecord(pilot, input, submission) {
   const publicId = pilotNumber(pilot.pilot_id);
   const userId = String(pilot.id);
   const instructor = pilotNumber(submission.actor.pilotId);
-  if (!['manual', 'import'].includes(submission.source)) throw new TrainingError('Invalid training record source.');
+  if (!['manual', 'import', 'pirep'].includes(submission.source)) throw new TrainingError('Invalid training record source.');
   const imported = submission.source === 'import';
   const discordId = imported ? null : snowflake(submission.actor.discordId);
-  const source = imported ? 'import' : 'manual';
+  const { source } = submission;
   const provenance = imported ? submission.provenance : null;
   const sourceKey = imported
     ? 'import:' + hash([provenance.dataset, provenance.sourceId])
     : 'discord:' + snowflake(submission.interactionId);
   const pirepId = input.pirepId ?? null;
-  if (pirepId !== null && (typeof pirepId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(pirepId))) {
-    throw new TrainingError('Invalid associated PIREP ID.');
+  if (source === 'pirep' ? !validPirepId(pirepId) : pirepId !== null) {
+    throw new TrainingError('Invalid associated PIREP ID for this training source.');
   }
   const attemptHash = hash([data.date, data.outcome, instructor, data.comments, pirepId]);
   const payloadHash = hash([userId, publicId, data.programId, data.lessonId, attemptHash, discordId, provenance]);
@@ -161,8 +178,17 @@ async function createRecord(db, record, { allowRepeat = false } = {}) {
       if (existing) return savedReplay(existing, record.payloadHash);
 
       checkEnrollment(enrollment);
-      await getLesson(connection, record.programId, record.lessonId);
-      if (!allowRepeat) assertDistinct(await matchingAttempt(connection, record));
+      await getLesson(connection, record.programId, record.lessonId, record.source === 'pirep');
+      if (record.source === 'pirep') {
+        await acceptedPilot(connection, record.pirepId, { id: record.userId, pilot_id: record.publicId }, true);
+        const duplicate = await first(connection, `SELECT record_id FROM vuscg_training_records
+          WHERE user_id = ? AND program_id = ? AND lesson_id = ? AND pirep_id = ? AND outcome = ?
+            AND active_pirep_evaluation = 1`,
+        [record.userId, record.programId, record.lessonId, record.pirepId, record.outcome]);
+        if (duplicate) throw new TrainingError(`This PIREP already has an active evaluation for that lesson and outcome (${duplicate.record_id}). Use training history to review it.`);
+      } else if (!allowRepeat) {
+        assertDistinct(await matchingAttempt(connection, record));
+      }
 
       const id = randomUUID();
       await connection.execute(`INSERT INTO vuscg_training_records
@@ -175,8 +201,9 @@ async function createRecord(db, record, { allowRepeat = false } = {}) {
       return { recordId: id, created: true, voided: false };
     });
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
-      const existing = await sourceRecord(db, record.sourceKey);
+    if (!(error instanceof TrainingError)) {
+      // A lost COMMIT response can leave the row persisted. Recover the receipt without resending announcements.
+      const existing = await sourceRecord(db, record.sourceKey).catch(() => null);
       if (existing) return savedReplay(existing, record.payloadHash);
     }
     throw error;
@@ -229,6 +256,9 @@ function summarizeProgress(rows) {
         lastSource: row.latest_source,
         lastLesson: row.latest_lesson,
         lastOutcome: row.latest_outcome,
+        lastRecordId: row.latest_record_id,
+        lastPirepId: row.latest_pirep_id,
+        lastSignoffTrainingDate: row.latest_signoff_training_date,
         lastTrainingDate: row.latest_training_date,
         completed: [],
         remaining: [],
@@ -248,6 +278,8 @@ async function progress(db, userId) {
     p.curriculum_complete, l.lesson_id, l.name AS lesson_name,
     latest.instructor_pilot_id AS latest_instructor, latest.source AS latest_source,
     latest.outcome AS latest_outcome, latest_lesson.name AS latest_lesson,
+    latest.record_id AS latest_record_id, latest.pirep_id AS latest_pirep_id,
+    DATE_FORMAT(latest.training_date, '%Y-%m-%d') AS latest_signoff_training_date,
     DATE_FORMAT(latest.created_at, '%Y-%m-%d %H:%i') AS latest_signoff_date,
     (SELECT DATE_FORMAT(MAX(r.training_date), '%Y-%m-%d') FROM vuscg_training_records r
       WHERE r.user_id = e.user_id AND r.program_id = e.program_id AND r.voided_at IS NULL) AS latest_training_date,
@@ -266,7 +298,7 @@ async function progress(db, userId) {
 }
 
 async function history(db, userId, limit, offset) {
-  const [rows] = await db.query(`SELECT r.record_id, r.outcome, r.instructor_pilot_id, r.comments, r.source,
+  const [rows] = await db.query(`SELECT r.record_id, r.outcome, r.instructor_pilot_id, r.comments, r.source, r.pirep_id,
     r.voided_by_pilot_id, r.void_reason, DATE_FORMAT(r.voided_at, '%Y-%m-%d %H:%i') AS voided_at,
     DATE_FORMAT(r.training_date, '%Y-%m-%d') AS training_date,
     p.name AS program_name, l.name AS lesson_name
@@ -278,6 +310,6 @@ async function history(db, userId, limit, offset) {
 }
 
 module.exports = {
-  findPilot, linkedPilot, linkedDiscordForPilot, getProgram, previewEvaluation, setEnrollment, prepareRecord, inspectImport,
+  findPilot, linkedPilot, linkedDiscordForPilot, getProgram, acceptedPilot, previewEvaluation, setEnrollment, prepareRecord, inspectImport,
   createRecord, getRecord, voidRecord, progress, summarizeProgress, history,
 };

@@ -350,7 +350,7 @@ On startup (and then every hour), the bot runs rank sync:
 
 ## Manual training records
 
-See the [P02 training guide](docs/training-p02.md) for signoffs, enrollment, and deployment.
+See the [P02 training guide](docs/training-p02.md) for enrollments and standalone signoffs, and the [P03 guide](docs/training-p03.md) for PIREP-linked signoffs and staging.
 
 ## Test and deployment workflow
 

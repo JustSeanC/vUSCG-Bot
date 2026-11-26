@@ -2,8 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Events\PirepAccepted;
+use App\Events\ProcessAward;
+use App\Events\UserStatsChanged;
 use App\Models\Pirep;
 use App\Services\PirepService;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
@@ -80,6 +84,45 @@ class PirepReviewBridgeTest extends TestCase
                 $this->send('decision', $payload)->assertStatus(409)->assertJsonPath('state', $state);
                 $this->send('status', ['pirep_id' => $id])->assertOk()->assertJsonPath('state', $state);
             }
+        } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_real_bridge_credits_only_the_first_acceptance(): void
+    {
+        $id = getenv('PIREP_BRIDGE_TEST_NATIVE_PENDING_ID');
+        if (!$id) {
+            $this->markTestSkipped('Requires an isolated native-accounting PIREP fixture.');
+        }
+
+        Event::fake([PirepAccepted::class, ProcessAward::class, UserStatsChanged::class]);
+        $connection = (new Pirep())->getConnection();
+        $connection->beginTransaction();
+        try {
+            config(['vuscg_pirep_review.decisions_enabled' => true]);
+            $pirep = Pirep::query()->findOrFail($id);
+            $this->assertSame(1, $pirep->state);
+            $minutes = (int) $pirep->flight_time;
+            $this->assertGreaterThan(0, $minutes);
+            $pilot = $pirep->user;
+            $aircraft = $pirep->aircraft;
+            $pilotMinutes = (int) $pilot->flight_time;
+            $aircraftMinutes = (int) $aircraft->flight_time;
+            $payload = [
+                'pirep_id' => $id,
+                'action' => 'approve',
+                'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => 'C121'],
+            ];
+
+            $this->send('decision', $payload)->assertOk()->assertJsonPath('state', 2);
+            $this->send('decision', $payload)->assertStatus(409)->assertJsonPath('state', 2);
+            $this->send('status', ['pirep_id' => $id])->assertOk()->assertJsonPath('state', 2);
+
+            $this->assertSame($pilotMinutes + $minutes, (int) $pilot->fresh()->flight_time);
+            $this->assertSame($aircraftMinutes + $minutes, (int) $aircraft->fresh()->flight_time);
+            Event::assertDispatchedTimes(PirepAccepted::class, 1);
+            Event::assertDispatchedTimes(ProcessAward::class, 1);
         } finally {
             $connection->rollBack();
         }

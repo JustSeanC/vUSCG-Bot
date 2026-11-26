@@ -1,5 +1,7 @@
 # P02 manual training records
 
+The [P03 guide](training-p03.md) covers linked evaluations and the current active and archived thread lookup.
+
 P02 stores instructor evaluations independently of PIREPs. Pilots can be enrolled in both Rotary Wing (`rw`) and Fixed Wing (`fw`) and progress through each on its own. The initial curriculum has nine configurable slots per program (`flight-1` to `flight-9`). Those slots mirror the tracker; they do not establish prerequisites, qualifications, Mission Rated status, or graduation. Stage Zero (`stage-zero`) is a separate disabled program with no seeded lessons.
 
 ## Deploy to a test installation
@@ -26,7 +28,7 @@ Readers acting on their own record and all users making changes need a valid `di
 
 Confirmation is private to the requester, expires after 60 seconds, and rechecks the live guild role and the linked identity before writing. Progress and history are ephemeral, including instructor comments, which are visible to the pilot and authorized staff in history. Exactly matching attempts in the same pilot/program/lesson are flagged based on training date, outcome, instructor C-number, normalized comments, and associated PIREP ID if present. Inspect history first, then use `repeat:true` only for an intentional identical manual attempt. Duplicate delivery of a single Discord interaction returns the existing record.
 
-A successful manual signoff can post a concise update in the existing active private thread `Training Case for C####` under the configured parent. The bot requires one matching thread and verifies the uniquely linked trainee belongs to it. Keep thread creation in that parent restricted to authorized staff and the bot. Notifications omit comments and mentions. Missing, archived, locked, or ambiguous threads and Discord errors leave the stored result intact. Notifications are best effort and have no background retry.
+A successful manual signoff can post a concise update in the existing active private thread `Training Case for C####` under the configured parent. The bot requires one matching thread and verifies the uniquely linked trainee belongs to it. Keep thread creation in that parent restricted to authorized staff and the bot. Notifications omit comments and mentions. In P02, missing, archived, locked, or ambiguous threads and Discord errors leave the stored result intact. Notifications are best effort and have no background retry.
 
 ## Storage and program configuration
 

@@ -6,6 +6,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const turf = require('@turf/turf');
+const { handlePirepTraining } = require('./utils/training/pirepSignoff');
 const { startPendingPirepWatcher, handlePirepButton } = require('./utils/pendingPireps');
 const flavorTexts = require('./flavorTexts.json');
 const syncRanks = require('./rankSync');
@@ -215,9 +216,25 @@ client.once('ready', () => {
 
 // ---------- Command Dispatcher ----------
 client.on('interactionCreate', async interaction => {
-    // Handle PIREP approve/deny buttons ----
+  if (interaction.isButton() && interaction.customId.startsWith('pirep-training:')) {
+    try {
+      await handlePirepTraining({
+        interaction, db,
+        roles: {
+          COMMAND_STAFF_ROLE_ID: process.env.COMMAND_STAFF_ROLE_ID,
+          INSTRUCTOR_PILOT_ROLE_ID: process.env.INSTRUCTOR_PILOT_ROLE_ID,
+        },
+      });
+    } catch (error) {
+      console.warn('PIREP training interaction closed:', error.code || error.name);
+    }
+    return;
+  }
+  // Handle PIREP approve/deny buttons.
   if (interaction.isButton() && String(interaction.customId || '').startsWith('pirep:')) {
-    if (!interaction.inGuild()) return;
+    if (!interaction.inGuild() || !process.env.GUILD_ID || interaction.guildId !== process.env.GUILD_ID) {
+      return interaction.reply({ content: 'PIREP review is available only in the configured vUSCG server.', ephemeral: true });
+    }
 
     const COMMAND_STAFF_ROLE_ID = process.env.COMMAND_STAFF_ROLE_ID;
     const INSTRUCTOR_PILOT_ROLE_ID = process.env.INSTRUCTOR_PILOT_ROLE_ID;

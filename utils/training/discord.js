@@ -1,14 +1,27 @@
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, escapeMarkdown } = require('discord.js');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown } = require('discord.js');
 const { OUTCOMES, TrainingError } = require('./validation');
+const { reportUrl } = require('../pirepEvidence');
+const { postToTrainingThread } = require('./threads');
 
 const noMentions = { parse: [], repliedUser: false };
 const safe = value => escapeMarkdown(String(value ?? '')).replace(/@/g, '@\u200b');
 const pilotLabel = pilot => `C${pilot.pilot_id} — ${safe(pilot.name).slice(0, 120)}`;
-const HISTORY_PAGE_SIZE = 3;
+const HISTORY_PAGE_SIZE = 2;
 const PROGRESS_PAGE_SIZE = 12;
 const total = track => track.completed.length + track.remaining.length;
 const completion = (passed, count) => count ? `${Math.floor(passed / count * 100)}%` : 'unavailable';
 const recentCommands = new Map();
+
+function pirepReference(id) {
+  const url = reportUrl(id);
+  return url ? `[${id}](<${url}>)` : safe(id);
+}
+
+function sourceLabel(source) {
+  if (source === 'pirep') return 'PIREP-linked';
+  if (source === 'import') return 'Historical import, Discord identity unverified';
+  return 'Standalone';
+}
 
 function checkRate(userId) {
   const now = Date.now();
@@ -32,7 +45,7 @@ async function confirm(interaction, summary, label = 'Confirm') {
     new ButtonBuilder().setCustomId(cancelId).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
   );
   const message = await interaction.editReply({
-    embeds: [summary], components: [row], allowedMentions: noMentions,
+    content: null, embeds: [summary], components: [row], allowedMentions: noMentions,
   });
   let click;
   try {
@@ -81,7 +94,7 @@ function progressEmbed(pilot, tracks, page) {
     ? completion(allDone, allCount)
     : 'unavailable while an active curriculum is incomplete';
   const lastSignoff = track.lastSignoffDate
-    ? `${track.lastSignoffDate} UTC · ${safe(track.lastLesson)} · ${OUTCOMES[track.lastOutcome]} · C${track.lastInstructor}${track.lastSource === 'import' ? ' (historical)' : ''}`
+    ? `${track.lastSignoffDate} UTC · ${safe(track.lastLesson)} · ${OUTCOMES[track.lastOutcome]} · C${track.lastInstructor} · ${sourceLabel(track.lastSource)}`
     : 'None';
   return embed
     .setDescription([
@@ -90,6 +103,7 @@ function progressEmbed(pilot, tracks, page) {
       `Program completion: ${track.curriculumComplete ? completion(track.completed.length, total(track)) : 'unavailable while the curriculum is incomplete'}`,
       `Active enrollments: ${active.length} · Overall: ${allDone}/${allCount} configured lessons · ${overall}`,
       `Most recent signoff entered: ${lastSignoff}`,
+      track.lastSource === 'pirep' ? `Record: \`${track.lastRecordId}\` · Training date: ${track.lastSignoffTrainingDate} · PIREP: ${pirepReference(track.lastPirepId)}` : '',
       `Most recent training date: ${track.lastTrainingDate ?? 'None'}`,
       `Next incomplete configured lesson: ${track.remaining[0] ? safe(track.remaining[0].name) : 'None'}`,
       '',
@@ -105,11 +119,12 @@ function historyEmbed(pilot, rows, page) {
     embed.addFields({
       name: `${row.training_date} · ${safe(row.program_name).slice(0, 70)} · ${safe(row.lesson_name).slice(0, 70)}`,
       value: [
-        `${OUTCOMES[row.outcome]}${row.voided_at ? ' · VOIDED' : ''} · C${row.instructor_pilot_id}${row.source === 'import' ? ' (historical, Discord identity unverified)' : ''}`,
+        `${OUTCOMES[row.outcome]}${row.voided_at ? ' · VOIDED' : ''} · C${row.instructor_pilot_id} · ${sourceLabel(row.source)}`,
         `ID: \`${row.record_id}\``,
-        row.comments ? safe(row.comments) : 'No comments.',
+        ...(row.source === 'pirep' ? [`PIREP: ${pirepReference(row.pirep_id)}`] : []),
       ].join('\n'),
     });
+    if (row.comments) embed.addFields({ name: 'Instructor comments', value: safe(row.comments) });
     if (row.voided_at) embed.addFields({
       name: `Voided by C${row.voided_by_pilot_id} · ${row.voided_at} UTC`,
       value: safe(row.void_reason),
@@ -126,13 +141,6 @@ async function postTrainingUpdate(guild, { pilot, lesson, data, actor, track, tr
   try {
     if (!traineeDiscordId) return false;
     const parent = await guild.channels.fetch(parentId);
-    if (!parent?.threads) return false;
-    const { threads } = await parent.threads.fetchActive();
-    const matches = threads.filter(thread => thread.parentId === parentId && thread.type === ChannelType.PrivateThread &&
-      !thread.archived && !thread.locked && thread.name === `Training Case for C${pilot.pilot_id}`);
-    if (matches.size !== 1) return false;
-    const thread = matches.first();
-    if (!(await thread.members.fetch({ member: traineeDiscordId, force: true }))) return false;
     const lines = [
       `**Training Update — C${pilot.pilot_id}**`,
       `Program: ${safe(lesson.program_name)}`,
@@ -140,14 +148,16 @@ async function postTrainingUpdate(guild, { pilot, lesson, data, actor, track, tr
       `Result: ${OUTCOMES[data.outcome]}`,
       `Instructor: C${actor.pilotId}`,
     ];
+    if (data.pirepId) lines.push(`PIREP: ${pirepReference(data.pirepId)}`);
     if (track) lines.push(`Progress: ${track.completed.length}/${total(track)} configured lessons passed`);
-    await thread.send({ content: lines.join('\n'), allowedMentions: noMentions });
-    return true;
+    return Boolean(await postToTrainingThread(parent, { pilotId: pilot.pilot_id, discordId: traineeDiscordId }, {
+      content: lines.join('\n'),
+    }));
   } catch {
     return false;
   }
 }
 
 module.exports = {
-  noMentions, safe, pilotLabel, checkRate, confirm, progressEmbed, historyEmbed, postTrainingUpdate, HISTORY_PAGE_SIZE,
+  noMentions, safe, pilotLabel, pirepReference, checkRate, confirm, progressEmbed, historyEmbed, postTrainingUpdate, HISTORY_PAGE_SIZE,
 };
