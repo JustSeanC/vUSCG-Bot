@@ -1,0 +1,43 @@
+name: Training system
+
+on:
+  push:
+    branches:
+      - develop/training-system
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: vuscg_training_test
+          MYSQL_USER: training_test
+          MYSQL_PASSWORD: training_test_local_only
+        ports:
+          - 3306/tcp
+        options: >-
+          --health-cmd="mysqladmin --protocol TCP -h 127.0.0.1 ping --silent"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: test -n "$TRAINING_TEST_MYSQL_PORT" && npm test
+        env:
+          TRAINING_TEST_MYSQL_PORT: ${{ job.services.mysql.ports[3306] }}
