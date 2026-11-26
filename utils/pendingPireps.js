@@ -1,4 +1,5 @@
 const fs = require('fs');
+const { createPirepBridge, validPirepId } = require('./pirepBridge');
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const CACHE_PATH = './pending_pireps_cache.json';
@@ -351,7 +352,7 @@ function startPendingPirepWatcher(opts) {
 }
 
 async function handlePirepButton(ctx) {
-  const { interaction, db, hasRole, roles } = ctx;
+  const { interaction, db, hasRole, roles, bridge = createPirepBridge() } = ctx;
 
   const allowed =
     hasRole(roles.INSTRUCTOR_PILOT_ROLE_ID) || hasRole(roles.COMMAND_STAFF_ROLE_ID);
@@ -364,59 +365,59 @@ async function handlePirepButton(ctx) {
   }
 
   const parts = String(interaction.customId || '').split(':');
-  // pirep:approve:<id> OR pirep:reject:<id>
-  const action = parts[1];
-  const pirepId = parts[2];
-
-  if (!pirepId || !['approve', 'reject'].includes(action)) {
+  const [, action, pirepId] = parts;
+  if (parts.length !== 3 || !validPirepId(pirepId) || !['approve', 'reject'].includes(action)) {
     return interaction.reply({ content: '❌ Invalid PIREP action.', ephemeral: true });
   }
 
-  const newState = action === 'approve' ? PIREP_STATE.ACCEPTED : PIREP_STATE.REJECTED;
-
+  await interaction.deferUpdate();
+  const reviewer = { discord_id: interaction.user.id, pilot_number: null };
   try {
-    // Only change if still pending (prevents double-approves)
-    const [res] = await db.query(
-      'UPDATE pireps SET state = ?, updated_at = NOW() WHERE id = ? AND state = ?',
-      [newState, pirepId, PIREP_STATE.PENDING]
+    const [links] = await db.query(
+      'SELECT pilot_id FROM discord_links WHERE discord_id = ? LIMIT 1', [reviewer.discord_id]
     );
+    const pilotId = String(links[0]?.pilot_id ?? '');
+    if (/^[0-9]{1,15}$/.test(pilotId)) reviewer.pilot_number = 'C' + pilotId;
+  } catch {
+    console.warn('Could not look up the Discord PIREP reviewer’s linked pilot number.');
+  }
 
-    const changed = res?.affectedRows > 0;
-
-    const updatedEmbed = EmbedBuilder.from(interaction.message.embeds?.[0] ?? new EmbedBuilder())
-      .setTitle(action === 'approve' ? '✅ Approved' : '⛔ Denied')
-      .setColor(action === 'approve' ? 0x2ecc71 : 0xe74c3c)
-      .setFooter({ text: `PIREP: ${pirepId} • Reviewed by ${interaction.user.tag}` });
-
-    // Update the message + remove buttons
-    await interaction.update({
-      embeds: [updatedEmbed],
-      components: [],
-    });
-
-    // Remove from cache if present
-    const cache = loadCache();
-    if (cache[String(pirepId)]) {
-      delete cache[String(pirepId)];
-      saveCache(cache);
-    }
-
-    // Optional extra acknowledgement if DB already changed
-    if (!changed) {
-      // (We already updated the message; this is just info for the reviewer)
-      try {
-        await interaction.followUp({
-          content: 'ℹ️ That PIREP was already resolved (not pending) in the database.',
-          ephemeral: true,
-        });
-      } catch {}
-    }
-  } catch (e) {
-    console.error('❌ Error handling PIREP button:', e);
-    return interaction.reply({
-      content: '❌ Failed to update PIREP state in the database.',
+  const result = await bridge.decide(pirepId, action, reviewer);
+  const resolved = Number.isInteger(result.state) && result.state !== PIREP_STATE.PENDING;
+  if (!resolved) {
+    const explanation = {
+      not_found: 'The PIREP was not found.',
+      invalid: 'The bridge rejected the PIREP ID or request.',
+      unauthorized: 'The bridge rejected authentication.',
+      busy: 'The bridge is rate limiting requests.',
+      reconciled: 'The PIREP was still pending at the last check. The original request may still be running.',
+    }[result.code] ?? 'The bridge is unavailable or the outcome could not be confirmed.';
+    return interaction.followUp({
+      content: `❌ ${explanation} Check the PIREP in the native phpVMS admin interface before taking action.`,
       ephemeral: true,
     });
+  }
+
+  const updatedEmbed = EmbedBuilder.from(interaction.message.embeds?.[0] ?? new EmbedBuilder())
+    .setTitle(`PIREP Resolved — ${pirepStateLabel(result.state)}`)
+    .setColor(result.state === PIREP_STATE.ACCEPTED ? 0x2ecc71 : 0xe74c3c)
+    .setFooter({ text: result.code === 'changed'
+      ? `PIREP: ${pirepId} • Reviewed by ${interaction.user.tag}`
+      : `PIREP: ${pirepId}` });
+
+  try {
+    await interaction.editReply({ embeds: [updatedEmbed], components: [] });
+  } catch {
+    return interaction.followUp({
+      content: `phpVMS confirmed the PIREP is ${pirepStateLabel(result.state)}, but the Discord message could not be updated.`,
+      ephemeral: true,
+    });
+  }
+
+  const cache = loadCache();
+  if (cache[pirepId]) {
+    delete cache[pirepId];
+    saveCache(cache);
   }
 }
 
