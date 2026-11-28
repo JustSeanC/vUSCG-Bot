@@ -105,7 +105,7 @@ async function commitConfirmedChange(ctx, change, original, policy = validateGra
     return await transaction(db, async connection => {
       const receipt = await readReceipt(connection, id, change, actor);
       if (receipt) return receipt;
-      const target = await findPilot(connection, change.pilot.pilot_id);
+      const target = await findPilot(connection, change.pilot.pilot_id, change.qualification === 'mr');
       if (target.id !== change.pilot.id) throw new TrainingError('The target pilot mapping changed.');
       const reviewer = await linkedPilot(connection, ctx.interaction);
       if (String(reviewer.id) !== actor.id || String(reviewer.pilot_id) !== actor.pilotId) {

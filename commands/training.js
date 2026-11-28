@@ -1,10 +1,13 @@
 const { EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 const service = require('../utils/training/service');
+const { saveInstruction, instruction, isTrack } = require('../utils/training/instructions');
+const { category } = require('../utils/training/materials');
+const { tryInstructionDelivery, deliverySummary } = require('../utils/training/instructionDelivery');
 const qualifications = require('../utils/training/qualifications');
 const { showDashboard } = require('../utils/training/dashboardDiscord');
 const { canUse, confirmedActor, saveSignoff } = require('../utils/training/signoff');
 const {
-  TrainingError, OUTCOMES, TEXT_LIMIT, code, text,
+  TrainingError, OUTCOMES, TEXT_LIMIT, code, text, recordId,
 } = require('../utils/training/validation');
 const {
   noMentions, safe, pilotLabel, checkRate, progressEmbed, historyEmbed, HISTORY_PAGE_SIZE,
@@ -20,6 +23,8 @@ const pageOption = option => option.setName('page').setDescription('Page to disp
 const dateOptions = sub => sub
   .addStringOption(o => o.setName('start').setDescription('Start date YYYY-MM-DD, inclusive').setMaxLength(10))
   .addStringOption(o => o.setName('end').setDescription('End date YYYY-MM-DD, inclusive').setMaxLength(10));
+
+const noteOption = o => o.setName('note').setDescription('Optional instructions posted in the private trainee thread').setMaxLength(TEXT_LIMIT);
 
 const definition = new SlashCommandBuilder()
   .setName('training').setDescription('Record and view vUSCG training')
@@ -38,10 +43,19 @@ const definition = new SlashCommandBuilder()
     .addIntegerOption(o => pilotOption(o)).addIntegerOption(pageOption))
   .addSubcommand(sub => sub.setName('history').setDescription('View training attempts, including voided records')
     .addIntegerOption(o => pilotOption(o, false)).addIntegerOption(pageOption))
-  .addSubcommand(sub => sub.setName('enroll').setDescription('Command Staff: start, resume, or pause a training enrollment')
+  .addSubcommand(sub => sub.setName('enroll').setDescription('Start or resume an enrollment. Command Staff can pause')
     .addIntegerOption(o => pilotOption(o))
     .addStringOption(trackOption)
-    .addBooleanOption(o => o.setName('active').setDescription('True to start or resume (default), false to pause')))
+    .addBooleanOption(o => o.setName('active').setDescription('True to start or resume (default), false to pause'))
+    .addStringOption(noteOption)
+    .addBooleanOption(o => o.setName('repeat').setDescription('Explicitly send new instructions to an already active trainee')))
+  .addSubcommand(sub => sub.setName('materials').setDescription('Share configured resources in a private training thread')
+    .addIntegerOption(o => pilotOption(o))
+    .addStringOption(o => o.setName('category').setDescription('Resource category code').setMaxLength(32).setRequired(true))
+    .addStringOption(noteOption))
+  .addSubcommand(sub => sub.setName('delivery').setDescription('Inspect or recover a training instruction delivery')
+    .addStringOption(o => o.setName('event_id').setDescription('Instruction event UUID').setMinLength(36).setMaxLength(36).setRequired(true))
+    .addBooleanOption(o => o.setName('retry').setDescription('Command Staff: retry after verifying the thread')))
   .addSubcommand(sub => sub.setName('void').setDescription('Command Staff: void a training record and retain its audit history')
     .addStringOption(o => o.setName('record_id').setDescription('Training record UUID').setMinLength(36).setMaxLength(36).setRequired(true))
     .addStringOption(o => o.setName('reason').setDescription('Reason for voiding the record').setMaxLength(TEXT_LIMIT).setRequired(true)))
@@ -68,21 +82,71 @@ async function record(ctx, staffPilot, pilotId) {
   return saveSignoff(ctx, staffPilot, { ...preview, repeat: options.getBoolean('repeat') === true });
 }
 
-async function enroll(ctx, staffPilot, pilotId) {
+async function sendInstruction(ctx, staffPilot, pilotId, action) {
   const { db, interaction } = ctx;
-  const programId = code(interaction.options.getString('track'), 'program');
-  const active = interaction.options.getBoolean('active') ?? true;
+  const options = interaction.options;
+  const isEnrollment = action !== 'materials';
+  const active = action !== 'pause';
+  const programId = isEnrollment ? code(options.getString('track'), 'program') : null;
+  if (action === 'enroll' && !isTrack(programId) && !canUse('configure', true, ctx.hasRole, ctx.roles)) {
+    throw new TrainingError('Instructors may enroll pilots in Fixed Wing and Rotary Wing.');
+  }
+  const repeat = isEnrollment && options.getBoolean('repeat') === true;
+  const note = text(options.getString('note'), 'Instructor note');
+  if (!active && (repeat || note)) throw new TrainingError('Pause requests cannot send instructional notes.');
   const pilot = await service.findPilot(db, pilotId);
-  const program = await service.getProgram(db, programId);
-  const summary = new EmbedBuilder().setTitle('Confirm training enrollment')
-    .setDescription(`${pilotLabel(pilot)} · ${safe(program.name)} · ${active ? 'Start or resume' : 'Pause'}`);
-  const actor = await confirmedActor(ctx, 'enroll', summary, staffPilot);
+  const group = isEnrollment ? await service.getProgram(db, programId) : await category(db, options.getString('category'));
+  const traineeDiscordId = active ? await service.linkedDiscordForPilot(db, pilot.pilot_id) : null;
+  if (active && (!traineeDiscordId || !(await interaction.guild.members.fetch({user: traineeDiscordId, force: true}).catch(() => null)))) {
+    throw new TrainingError('This pilot needs one verified Discord account in this server.');
+  }
+
+  const reason = isEnrollment ? (active ? (repeat ? 'Start, resume, or explicitly send updated instructions' : 'Start or resume') : 'Pause') : 'Share resources';
+  const summary = new EmbedBuilder().setTitle('Confirm training instruction').setDescription([
+    `${pilotLabel(pilot)} · ${safe(group.name)} · ${reason}`,
+    note && `Instructor note for the private thread: ${safe(note)}`,
+  ].filter(Boolean).join('\n'));
+  const reviewAction = action === 'enroll' && !isTrack(programId) ? 'configure' : action;
+  const actor = await confirmedActor(ctx, reviewAction, summary, staffPilot);
   if (!actor) return;
-  const current = await service.findPilot(db, pilotId);
-  if (current.id !== pilot.id) throw new TrainingError('The target pilot mapping changed. Run the command again.');
-  await service.setEnrollment(db, { userId: pilot.id, programId, active, actor });
+
+  const event = await saveInstruction(db, {
+    source: isEnrollment ? 'enrollment' : 'materials', pilot, traineeDiscordId, actor,
+    programId, categoryId: group.category_id, active, repeat, note, interactionId: interaction.id, guildId: interaction.guildId,
+  });
+  const result = event.discord_state
+    ? await tryInstructionDelivery(db, interaction.guild, event.event_id).catch(() => ({ state: 'pending' })) : { state: 'none' };
+  const status = event.kind === 'unchanged' ? 'The enrollment was already in the requested state. No new delivery was queued.'
+    : isEnrollment ? `Enrollment ${event.kind === 'pause' ? 'paused' : 'active'}.` : 'Materials sharing saved.';
+  const warning = event.discord_state && event.resources.length === 0
+    ? ' No active materials are configured. Ask Command Staff to add links.' : '';
   await interaction.editReply({
-    content: `C${pilot.pilot_id}’s ${safe(program.name)} enrollment is ${active ? 'active' : 'paused'}.`,
+    content: `${status} ${deliverySummary(result)}${warning} Event: \`${event.event_id}\`.`,
+    allowedMentions: noMentions,
+  });
+}
+
+async function inspectDelivery(ctx) {
+  const { interaction, db } = ctx;
+  const id = recordId(interaction.options.getString('event_id')?.toLowerCase());
+  const event = await instruction(db, id);
+  if (!event || event.guild_id !== interaction.guildId) throw new TrainingError('Training instruction not found in this server.');
+  let result = { state: event.discord_state || 'none', result: event.discord_result };
+  if (interaction.options.getBoolean('retry')) {
+    if (!canUse('configure', true, ctx.hasRole, ctx.roles)) throw new TrainingError('Only Command Staff may reconcile or retry delivery.');
+    const staff = await service.linkedPilot(db, interaction);
+    const summary = new EmbedBuilder().setTitle('Confirm delivery recovery').setDescription([
+      `Event \`${id}\` for C${event.public_pilot_id}`,
+      'Check the existing private thread first. If no sent message can be verified, this retries the saved message.',
+    ].join('\n'));
+    const actor = await confirmedActor(ctx, 'configure', summary, staff, 'Reconcile or retry');
+    if (!actor) return;
+    result = await tryInstructionDelivery(db, interaction.guild, id, actor);
+  }
+
+  const rating = event.rating_state ? ` Native trainee rating: ${safe(event.rating_state)}${event.rating_result ? ` (${safe(event.rating_result)})` : ''}.` : '';
+  await interaction.editReply({
+    content: `Event \`${id}\` · C${event.public_pilot_id} · ${safe(event.label)}. ${deliverySummary(result)}${rating}`,
     allowedMentions: noMentions,
   });
 }
@@ -123,7 +187,8 @@ async function execute(ctx) {
   if (!interaction.inGuild() || !process.env.GUILD_ID || interaction.guildId !== process.env.GUILD_ID) {
     return reply('Training commands are available only inside the configured vUSCG server.');
   }
-  const action = interaction.options.getSubcommand();
+  const subcommand = interaction.options.getSubcommand();
+  const action = subcommand === 'enroll' && interaction.options.getBoolean('active') === false ? 'pause' : subcommand;
   const pilotId = interaction.options.getInteger('pilot_id');
   if (!canUse(action, pilotId != null, hasRole, roles)) return reply('You do not have permission to use that training command.');
 
@@ -131,10 +196,15 @@ async function execute(ctx) {
     checkRate(interaction.user.id);
     await interaction.deferReply({ ephemeral: true });
     if (['roster', 'stats', 'instructors'].includes(action)) return await showDashboard(ctx, action);
-    if (['record', 'enroll', 'void'].includes(action)) {
+    if (action === 'delivery') {
+      const member = await interaction.guild.members.fetch({ user: interaction.user.id, force: true });
+      if (!canUse(action, true, id => member.roles.cache.has(id), roles)) throw new TrainingError('Staff permissions could not be verified.');
+      return await inspectDelivery(ctx);
+    }
+    if (['record', 'enroll', 'pause', 'materials', 'void'].includes(action)) {
       const staffPilot = await service.linkedPilot(db, interaction);
       if (action === 'record') return await record(ctx, staffPilot, pilotId);
-      if (action === 'enroll') return await enroll(ctx, staffPilot, pilotId);
+      if (action !== 'void') return await sendInstruction(ctx, staffPilot, pilotId, action);
       return await correct(ctx, staffPilot);
     }
     const pilot = action === 'progress' || pilotId == null

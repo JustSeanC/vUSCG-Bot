@@ -4,6 +4,7 @@ module.exports = {
   mycgas: { category: 'Personal Activity', description: 'Show progress through the current Coast Guard air-station tour. Staff may target another pilot.', usage: '/mycgas', access: 'member' },
   cgasleaderboard: { category: 'Staff Tools', description: 'Rank active pilots by current CGAS tour progress and identify completers.', usage: '/cgasleaderboard', access: 'staffOrInstructor' },
   training: { category: 'Personal Activity', description: 'View private training progress or history. Staff can record evaluations and look up pilots.', usage: '/training progress', access: 'member' },
+  'training-config': { category: 'Staff Tools', description: 'View training resources. Command Staff can configure links.', usage: '/training-config links category:rw', access: 'staffOrInstructor' },
   qualification: { category: 'Staff Tools', description: 'View pilot qualifications and review qualification changes.', usage: '/qualification list pilot_id:3250', access: 'staffOrInstructor' },
   help: { category: 'Personal Activity', description: 'Show commands available to you.', usage: '/help', access: 'member' },
   location: { category: 'Flight Operations', description: 'Find aircraft by registration, type, or airport.', usage: '/location search:C6052', access: 'member' },

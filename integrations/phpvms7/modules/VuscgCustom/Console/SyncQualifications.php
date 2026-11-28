@@ -11,6 +11,7 @@ use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Support\Facades\DB;
 use Modules\VuscgCustom\Services\QualificationNativePlan as Plan;
+use Modules\VuscgCustom\Services\TraineeRatingPlan;
 use Throwable;
 
 final class SyncQualifications extends Command
@@ -21,7 +22,9 @@ final class SyncQualifications extends Command
     public function handle(): int
     {
         $settings = config('vuscg_qualifications', []);
-        if (($settings['enabled'] ?? false) !== true) {
+        $qualifications = ($settings['enabled'] ?? false) === true;
+        $trainees = TraineeRatingPlan::enabled($settings);
+        if (!$qualifications && !$trainees) {
             $this->line('Native qualification synchronization is disabled.');
             return self::SUCCESS;
         }
@@ -31,7 +34,7 @@ final class SyncQualifications extends Command
             $this->error('Use a qualification event UUID.');
             return self::FAILURE;
         }
-        $jobs = DB::table('vuscg_training_qualification_sync')->whereIn('state', ['pending', 'retry'])
+        $jobs = !$qualifications ? [] : DB::table('vuscg_training_qualification_sync')->whereIn('state', ['pending', 'retry'])
             ->whereIn('target', ['award', 'ip_role', 'type_rating'])
             ->when($eventId, fn ($query) => $query->where('event_id', $eventId))
             ->where('next_attempt_at', '<=', DB::raw('UTC_TIMESTAMP()'))
@@ -106,6 +109,10 @@ final class SyncQualifications extends Command
                 });
                 $this->warn('A qualification sync will retry: '.$code);
             }
+        }
+
+        if ($trainees) {
+            $this->syncTraineeJobs($settings, $eventId);
         }
 
         return self::SUCCESS;
@@ -187,7 +194,7 @@ final class SyncQualifications extends Command
         return $rows->first();
     }
 
-    private function syncRating(User $user, array $mapping, string $marker, bool $active, array $settings): array
+    private function ratingRelation(User $user, array $settings): array
     {
         $column = $settings['rating_code_column'] ?? null;
         $relation = $user->typeratings();
@@ -196,6 +203,12 @@ final class SyncQualifications extends Command
             $relation->getRelated()->getConnection() !== DB::connection()) {
             throw new DomainException('rating_schema_not_verified');
         }
+        return [$relation, $column];
+    }
+
+    private function syncRating(User $user, array $mapping, string $marker, bool $active, array $settings): array
+    {
+        [$relation, $column] = $this->ratingRelation($user, $settings);
         $rating = $this->findRating($column, $mapping['qualified']);
         if ($active && !$rating->active) {
             throw new DomainException('qualified_rating_disabled');
@@ -219,6 +232,120 @@ final class SyncQualifications extends Command
         }
 
         return [$result, (string) $rating->id];
+    }
+
+    private function traineeQueue(string $id)
+    {
+        return DB::table('vuscg_training_instruction_delivery')->where(['event_id' => $id, 'target' => 'trainee_rating']);
+    }
+
+    private function traineeDue(?object $job): bool
+    {
+        return $job && in_array($job->state, ['pending', 'retry'], true)
+            && $job->next_attempt_at <= gmdate('Y-m-d H:i:s').'.999999';
+    }
+
+    private function recordTrainee(string $eventId, string $state, string $result, ?string $nativeId = null): void
+    {
+        $this->traineeQueue($eventId)->update([
+            'state' => $state, 'result' => $result,
+            'next_attempt_at' => DB::raw('DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 15 MINUTE)'),
+        ]);
+        DB::table('vuscg_training_instruction_attempts')->insert([
+            'event_id' => $eventId, 'target' => 'trainee_rating', 'native_id' => $nativeId,
+            'result' => $result, 'created_at' => DB::raw('UTC_TIMESTAMP(6)'),
+        ]);
+    }
+
+    private function syncTraineeJobs(array $settings, ?string $id): void
+    {
+        $ids = DB::table('vuscg_training_instruction_delivery')->where('target', 'trainee_rating')
+            ->whereIn('state', ['pending', 'retry'])->where('next_attempt_at', '<=', DB::raw('UTC_TIMESTAMP(6)'))
+            ->when($id, fn ($query) => $query->where('event_id', $id))
+            ->orderBy('next_attempt_at')->limit(50)->pluck('event_id');
+        foreach ($ids as $eventId) {
+            try {
+                DB::transaction(function () use ($eventId, $settings): void {
+                    if (!$this->traineeDue($this->traineeQueue($eventId)->lockForUpdate()->first())) {
+                        return;
+                    }
+                    $this->applyTraineeRating($eventId, $settings);
+                });
+            } catch (Throwable $error) {
+                $code = $error instanceof DomainException && preg_match('/\A[a-z_]{1,60}\z/', $error->getMessage())
+                    ? $error->getMessage() : 'native_database_or_model_error';
+                DB::transaction(function () use ($eventId, $code): void {
+                    if ($this->traineeDue($this->traineeQueue($eventId)->lockForUpdate()->first())) {
+                        $this->recordTrainee($eventId, 'retry', $code);
+                    }
+                });
+                $this->warn('A trainee rating will retry: '.$code);
+            }
+        }
+    }
+
+    private function applyTraineeRating(string $eventId, array $settings): void
+    {
+        $event = DB::table('vuscg_training_instruction_events')->where('event_id', $eventId)->first();
+        if (!in_array($event->kind, ['start', 'resume'], true)) {
+            $this->recordTrainee($eventId, 'superseded', 'invalid_enrollment_event');
+            return;
+        }
+        $mapping = TraineeRatingPlan::mapping($event->program_id);
+        // The enrollment and MR writers take this same user row before changing current state.
+        $user = User::query()->whereKey($event->user_id)->lockForUpdate()->first();
+        if (!$user || $user->getConnection() !== DB::connection() || (string) $user->pilot_id !== (string) $event->public_pilot_id) {
+            throw new DomainException('pilot_mapping_changed');
+        }
+        $enrollment = DB::table('vuscg_training_enrollments as e')
+            ->join('vuscg_training_programs as p', 'p.program_id', '=', 'e.program_id')
+            ->where('e.user_id', $event->user_id)->where('e.program_id', $event->program_id)
+            ->select('e.active', 'p.enabled')->sharedLock()->first();
+        $latest = DB::table('vuscg_training_instruction_events')->where([
+                'user_id' => $event->user_id, 'program_id' => $event->program_id,
+            ])->whereIn('kind', ['start', 'resume', 'pause'])->orderByDesc('event_seq')->sharedLock()->value('event_id');
+        $missionRated = DB::table('vuscg_training_qualification_status')->where([
+            'user_id' => $event->user_id, 'program_id' => $event->program_id, 'qualification_id' => 'mr', 'active' => true,
+        ])->sharedLock()->first();
+        $newerGrant = DB::table('vuscg_training_qualification_events')->where([
+            'user_id' => $event->user_id, 'program_id' => $event->program_id, 'qualification_id' => 'mr', 'action' => 'grant',
+        ])->where('created_at', '>=', $event->created_at)->sharedLock()->first() !== null;
+        $hold = TraineeRatingPlan::hold(
+            (bool) ($enrollment->active ?? false) && (bool) ($enrollment->enabled ?? false),
+            $latest === $eventId, $missionRated !== null || $newerGrant,
+        );
+        if ($hold !== null) {
+            $this->recordTrainee($eventId, 'superseded', $hold);
+            return;
+        }
+
+        $links = DB::table('discord_links')->where('pilot_id', $event->public_pilot_id)->sharedLock()->pluck('discord_id');
+        if ($links->count() !== 1 || (string) $links->first() !== (string) $event->trainee_discord_id ||
+            DB::table('discord_links')->where('discord_id', $event->trainee_discord_id)
+                ->where('pilot_id', '<>', $event->public_pilot_id)->sharedLock()->first()) {
+            throw new DomainException('discord_link_changed');
+        }
+
+        [$relation, $column] = $this->ratingRelation($user, $settings);
+        $qualified = $this->findRating($column, $mapping['qualified']);
+        if (DB::table('typerating_user')->where([
+            'user_id' => $user->id, 'typerating_id' => $qualified->id,
+        ])->lockForUpdate()->first()) {
+            $this->recordTrainee($eventId, 'superseded', 'native_already_qualified', (string) $qualified->id);
+            return;
+        }
+        $rating = $this->findRating($column, $mapping['trainee']);
+        if (!$rating->active) {
+            throw new DomainException('trainee_rating_inactive');
+        }
+        $identity = ['user_id' => $user->id, 'typerating_id' => $rating->id];
+        $marker = hash('sha256', 'vuscg-enrollment-v1:'.$user->id.':'.$event->program_id);
+        $result = $this->syncAssociation('typerating_user', $identity, $marker, true,
+            fn () => $relation->attach($rating->id, ['vuscg_qualification_owner' => $marker]));
+        if (!DB::table('typerating_user')->where($identity)->exists()) {
+            throw new DomainException('trainee_rating_not_persisted');
+        }
+        $this->recordTrainee($eventId, 'complete', $result, (string) $rating->id);
     }
 
     private function syncAssociation(string $table, array $identity, string $marker, bool $active, callable $insert): string

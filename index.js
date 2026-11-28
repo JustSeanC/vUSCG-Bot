@@ -6,6 +6,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const turf = require('@turf/turf');
+const { startInstructionWorker } = require('./utils/training/instructionDelivery');
 const { startGraduationWorker } = require('./utils/training/graduation');
 const { handlePirepTraining } = require('./utils/training/pirepSignoff');
 const { startPendingPirepWatcher, handlePirepButton } = require('./utils/pendingPireps');
@@ -169,6 +170,7 @@ client.once('ready', () => {
 
   // Handle PIREP button interactions
   startGraduationWorker(client, db, process.env.GUILD_ID);
+  startInstructionWorker(client, db, process.env.GUILD_ID);
   startPendingPirepWatcher({
     client,
     db,

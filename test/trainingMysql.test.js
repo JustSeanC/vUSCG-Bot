@@ -11,6 +11,13 @@ const { promoteRank, runGraduations } = require('../utils/training/graduation');
 const { Collection, ChannelType } = require('discord.js');
 const { parseInput, importRows } = require('../utils/training/import');
 
+const { saveInstruction, instruction } = require('../utils/training/instructions');
+const { prepareResource, changeResource, listResources } = require('../utils/training/materials');
+const { tryInstructionDelivery } = require('../utils/training/instructionDelivery');
+const trainingCommand = require('../commands/training');
+const trainingConfig = require('../commands/trainingConfig');
+const activate = require('../commands/activate');
+
 const port = process.env.TRAINING_TEST_MYSQL_PORT;
 const actor = { discordId: '123456789012345678', pilotId: 11 };
 
@@ -534,6 +541,212 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
     assert.ok(inventory[5].some(row => row.CONSTRAINT_NAME === 'chk_training_qual_actor' && row.ENFORCED === 'YES'));
     const [[count]] = await db.query('SELECT COUNT(*) AS count FROM bot_cgas_completions');
     assert.equal(count.count, 0);
+  });
+
+
+  await t.test('008 catalogs, staff enrollment, independent sharing and private delivery recovery', async subtest => {
+    const base = Date.now();
+    let time = 0;
+    subtest.mock.method(Date, 'now', () => base + (time += 2500));
+    const sql = await readFile(path.join(__dirname, '../migrations/008_training_materials_and_delivery.sql'), 'utf8');
+    await db.query(sql);
+    await db.query(sql);
+    await db.query(`
+      ALTER TABLE users ADD state INT NOT NULL DEFAULT 1;
+      INSERT INTO users (id,pilot_id,name,flight_time) VALUES
+        (87,3387,'Example Trainee',0), (88,3388,'Stage Zero Pilot',0);
+      INSERT INTO discord_links VALUES ('130000000000003387',3387);
+      ALTER TABLE discord_links ADD linked_at DATETIME NULL;
+    `);
+    const configured = { GUILD_ID: '130000000000000001', TRAINING_CHANNEL_ID: '130000000000000002', TRAINING_INSTRUCTION_DELIVERY_ENABLED: 'true' };
+    const previous = Object.fromEntries(Object.keys(configured).map(key => [key, process.env[key]]));
+    Object.assign(process.env, configured);
+    t.after(() => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+    const publicId = 3387;
+    const trainee = '130000000000003387';
+    const reviewer = '100000000000000055';
+    const staff = { pilotId: 55, discordId: reviewer };
+    const memberRole = { roles: { cache: new Set(['command']) } };
+    const ordinaryMember = { setNickname: async () => {}, roles: { add: async () => {}, remove: async () => {} } };
+    const botId = 'bot';
+    const channel = { id: configured.TRAINING_CHANNEL_ID };
+    const threads = new Collection();
+    const received = [];
+    const sentMessages = new Collection();
+    let serial = 0;
+    let sends = 0;
+    let created = 0;
+    let fail = false;
+    const createThread = ({ name, type }) => {
+      const id = '1400000000000000' + (++created).toString().padStart(2,'0');
+      const thread = { id, name, type, parentId: channel.id, archived: false,
+        members: { fetch: async () => true, add: async () => {} },
+        messages: { fetch: async () => sentMessages.filter(message => message.channelId === id) },
+        setArchived: async value => { thread.archived = value; },
+        async send(payload) {
+          received.push(payload);
+          sends++;
+          const message = { id: '150000000000000' + String(sends).padStart(3,'0'), author: { id: botId }, channelId: id,
+            embeds: (payload.embeds || []).map(embed => embed.toJSON()) };
+          sentMessages.set(message.id, message);
+          if (fail) { fail = false; throw new Error('Discord response lost after commit'); }
+          return message;
+        },
+      };
+      threads.set(id, thread);
+      return thread;
+    };
+    channel.threads = {
+      fetchActive: async () => ({ threads: threads.filter(thread => !thread.archived) }),
+      fetchArchived: async () => ({ threads: threads.filter(thread => thread.archived), hasMore: false }),
+      create: async value => createThread(value),
+    };
+    const guild = { id: configured.GUILD_ID, client: { user: { id: botId } },
+      members: { fetch: async ({ user }) => user === reviewer ? memberRole : ordinaryMember },
+      channels: { fetch: async id => id === channel.id ? channel : null } };
+    const next = () => '79000000000000' + String(++serial).padStart(4, '0');
+    function context(action, values, role = 'command') {
+      const user = { id: role === 'command' ? reviewer : actor.discordId };
+      const log = [];
+      const interaction = {
+        id: next(), user, guildId: guild.id, guild: {
+          ...guild, members: { fetch: async input => input.user === user.id
+            ? { roles: { cache: new Set([role]) } } : ordinaryMember },
+        }, inGuild: () => true,
+        options: {
+          getSubcommand: () => action, getString: key => values[key] ?? null,
+          getBoolean: key => values[key] ?? null, getInteger: key => values[key] ?? null, getUser: key => values[key],
+        },
+        deferReply: async ({ ephemeral }) => { assert.equal(ephemeral, true); interaction.deferred = true; },
+        reply: async payload => { log.push(payload); },
+        editReply: async payload => {
+          log.push(payload);
+          return { awaitMessageComponent: async ({ filter }) => {
+            const button = { customId: payload.components[0].components[0].data.custom_id, guildId: guild.id, user,
+              isButton: () => true, deferUpdate: async () => {} };
+            assert.ok(filter(button));
+            return button;
+          } };
+        },
+      };
+      return { interaction, db, log, roles: { COMMAND_STAFF_ROLE_ID: 'command', INSTRUCTOR_PILOT_ROLE_ID: 'instructor' },
+        hasRole: id => id === role };
+    }
+    const resource = async (category, title, i) => {
+      const request = context('add-link', { category, title, url: 'https://drive.google.com/open?id=' + i, order: i });
+      await trainingConfig.execute(request);
+      assert.match(request.log.at(-1).content, /Saved training configuration/);
+      return (await listResources(db, category)).find(row => row.title === title);
+    };
+    const rotor = await resource('rw', 'Rotary guide', 2);
+    await resource('rw', 'Rotary checklist', 3);
+    await resource('hitron', 'HITRON instructions', 8);
+    await resource('mq9', 'MQ9 guide', 4);
+    await assert.rejects(changeResource(db, { action: 'add_link', prepared: prepareResource('add_link', {
+      categoryId: 'unknown', title: 'Unknown', url: 'https://example.test/',
+    }), actor: staff, interactionId: next() }), /category is unavailable/);
+
+    const rw = context('enroll', { pilot_id: publicId, track: 'rw', note: 'Start from Stage 1.' }, 'instructor');
+    await trainingCommand.execute(rw);
+    assert.match(rw.log.at(-1).content, /Enrollment active.*private training thread is missing/);
+    const [[saved]] = await db.execute('SELECT event_id, note, resources FROM vuscg_training_instruction_events WHERE interaction_id=?', [rw.interaction.id]);
+    assert.equal(saved.note, 'Start from Stage 1.');
+    assert.deepEqual(saved.resources.map(item => item.title), ['Rotary guide', 'Rotary checklist']);
+    assert.equal((await instruction(db, saved.event_id)).rating_state, 'pending');
+
+    const edit = context('edit-link', { resource_id: rotor.resource_id, order: 4, title: 'Latest rotary guide' });
+    await trainingConfig.execute(edit);
+    assert.match(edit.log.at(-1).content, /Saved training configuration/);
+    const remove = context('remove-link', { resource_id: rotor.resource_id });
+    await trainingConfig.execute(remove);
+    assert.match(remove.log.at(-1).content, /Saved training configuration/);
+    const [[audit]] = await db.execute('SELECT before_snapshot, after_snapshot FROM vuscg_training_resource_audit WHERE interaction_id=?', [remove.interaction.id]);
+    assert.equal(audit.before_snapshot.title, 'Latest rotary guide');
+    assert.equal(audit.after_snapshot.active, false);
+    assert.equal((await listResources(db, 'rw')).length, 1);
+    const staffList = context('links', { category: 'rw' }, 'instructor');
+    await trainingConfig.execute(staffList);
+    assert.match(staffList.log.at(-1).embeds[0].toJSON().fields[0].name, /Rotary checklist/);
+    assert.doesNotMatch(JSON.stringify(staffList.log.at(-1).embeds[0].toJSON()), /Latest rotary guide/);
+
+    const privateThread = createThread({ name: 'Training Case for C3387', type: ChannelType.PrivateThread });
+    privateThread.archived = true;
+    assert.equal((await tryInstructionDelivery(db, guild, saved.event_id, staff)).state, 'complete');
+    assert.equal(privateThread.archived, false);
+    assert.match(received.at(-1).embeds[0].toJSON().description, /Rotary guide/);
+    assert.match(received.at(-1).embeds[0].toJSON().description, /Start from Stage 1/);
+    assert.equal((await tryInstructionDelivery(db, guild, saved.event_id, staff)).state, 'complete');
+    assert.equal(sends, 1);
+
+    const repeat = context('enroll', { pilot_id: publicId, track: 'rw' }, 'instructor');
+    await trainingCommand.execute(repeat);
+    assert.match(repeat.log.at(-1).content, /already in the requested state/);
+    assert.equal(sends, 1);
+    const fw = context('enroll', { pilot_id: publicId, track: 'fw' }, 'instructor');
+    await trainingCommand.execute(fw);
+    assert.match(fw.log.at(-1).content, /No active materials/);
+    assert.deepEqual((await db.execute('SELECT program_id FROM vuscg_training_enrollments WHERE user_id=87 AND active ORDER BY program_id'))[0]
+      .map(row => row.program_id), ['fw','rw']);
+
+    const pause = context('enroll', { pilot_id: publicId, track: 'rw', active: false });
+    await trainingCommand.execute(pause);
+    assert.match(pause.log.at(-1).content, /paused/);
+    const [[paused]] = await db.execute('SELECT event_id FROM vuscg_training_instruction_events WHERE interaction_id=?', [pause.interaction.id]);
+    assert.equal((await instruction(db, paused.event_id)).rating_state, null);
+    const resume = context('enroll', { pilot_id: publicId, track: 'rw', note: 'Updated instructions.' }, 'instructor');
+    await trainingCommand.execute(resume);
+    const [[resumed]] = await db.execute('SELECT event_id FROM vuscg_training_instruction_events WHERE interaction_id=?', [resume.interaction.id]);
+    assert.equal((await instruction(db, resumed.event_id)).rating_state, 'pending');
+
+    fail = true;
+    const share = context('materials', { pilot_id: publicId, category: 'mq9', note: 'Read before meeting.' }, 'instructor');
+    await trainingCommand.execute(share);
+    assert.match(share.log.at(-1).content, /delivery is uncertain/);
+    const [[shared]] = await db.execute('SELECT event_id FROM vuscg_training_instruction_events WHERE interaction_id=?', [share.interaction.id]);
+    const before = sends;
+    assert.equal((await tryInstructionDelivery(db, guild, shared.event_id, staff)).result, 'reconciled');
+    assert.equal(sends, before);
+    assert.equal((await instruction(db, shared.event_id)).rating_state, null);
+    const hitron = context('materials', { pilot_id: publicId, category: 'hitron' }, 'instructor');
+    await trainingCommand.execute(hitron);
+    assert.match(hitron.log.at(-1).content, /Delivered to the private/);
+    assert.equal((await qualifications.activeAwards(db, '87')).length, 0);
+
+    const launchStageZero = () => context('activate', { pilot_id: 3388, user: { id: '130000000000003388', username: 'fixture' }, low_hours: 'yes' });
+    const staged = launchStageZero();
+    await activate.execute(staged);
+    assert.match(staged.log.at(-1).content, /Stage Zero has no configured links/);
+    assert.doesNotMatch(received.at(-1).embeds[0].toJSON().description, /drive.google.com/);
+    const stageCount = sends;
+    const activationRetry = launchStageZero();
+    await activate.execute(activationRetry);
+    assert.equal(created, 2);
+    assert.equal(sends, stageCount);
+    await resource('stage0', 'Stage Zero folder', 5);
+    const stageShare = context('materials', { pilot_id: 3388, category: 'stage0' }, 'instructor');
+    await trainingCommand.execute(stageShare);
+    assert.match(stageShare.log.at(-1).content, /Delivered to the private/);
+    const [[stage]] = await db.execute("SELECT event_id FROM vuscg_training_instruction_events WHERE kind='stage0' AND user_id=88");
+    assert.equal((await instruction(db, stage.event_id)).rating_state, null);
+    assert.deepEqual((await db.execute('SELECT * FROM vuscg_training_enrollments WHERE user_id=88'))[0], []);
+
+    const input = { source: 'materials', pilot: await training.findPilot(db, publicId), actor: staff,
+      categoryId: 'mq9', interactionId: next(), guildId: guild.id, traineeDiscordId: trainee,
+    };
+    const delivered = await Promise.all([saveInstruction(db, input), saveInstruction(db, input)]);
+    assert.equal(delivered[0].event_id, delivered[1].event_id);
+    await Promise.all(delivered.map(event => tryInstructionDelivery(db, guild, event.event_id)));
+    assert.equal((await instruction(db, delivered[0].event_id)).discord_state, 'complete');
+
+    const queued = await saveInstruction(db, { ...input, interactionId: next() });
+    await db.execute("UPDATE discord_links SET discord_id='130000000000003999' WHERE pilot_id=?", [publicId]);
+    const sentBeforeRemap = sends;
+    assert.equal((await tryInstructionDelivery(db, guild, queued.event_id)).result, 'discord_link_changed');
+    assert.equal(sends, sentBeforeRemap);
   });
 
 });

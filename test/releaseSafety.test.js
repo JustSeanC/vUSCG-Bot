@@ -33,7 +33,7 @@ test('activation refuses to reset a graduated pilot or replace an existing accou
       guild: { members: { fetch: async () => ({}) }, channels: { fetch: async () => ({ threads: {} }) } },
     };
     await activate.execute({ interaction, roles: { COMMAND_STAFF_ROLE_ID: 'staff' }, hasRole: id => id === 'staff',
-      db: { query: async sql => {
+      db: { getConnection: async () => ({ execute: async () => [[{ acquired: 1 }]], release: () => {} }), query: async sql => {
         if (sql.includes('FROM users')) return [[{ name: 'Example Pilot', rank_id: fixture === 'rank' ? 15 : 12 }]];
         if (sql.includes('FROM discord_links') && fixture === 'link') return [[{ discord_id: 'different', pilot_id: 3250 }]];
         assert.fail('Unexpected activation write');
@@ -85,7 +85,7 @@ test('offline registration preserves existing commands and fails on REST rejecti
     REST.prototype.put = async (_, request) => {
       const names = request.body.map(command => command.name);
       for (const name of ['activate','manualpirep','mission','jumpseat','location','myactivity','myairports',
-        'mycgas','cgasleaderboard','moveaircraft','activity90','forceranksync','help','training','qualification']) {
+        'mycgas','cgasleaderboard','moveaircraft','activity90','forceranksync','help','training','training-config','qualification']) {
         assert.ok(names.includes(name), name);
       }
       assert.ok(!names.includes('promote'));

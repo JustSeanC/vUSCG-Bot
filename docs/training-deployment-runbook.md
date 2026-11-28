@@ -2,6 +2,8 @@
 
 Use the [P05 release verdict](training-p05-readiness.md) as the production gate. Rehearse the procedure on isolated infrastructure first. P05 denies bridge decisions outside Laravel staging and testing even when the flag is set. Keep the actual production environment and the bridge decision flag unchanged.
 
+For P06 releases, also follow the [P06 installation and staging procedure](training-p06.md). Apply migration 008 before registering new training commands. Keep VUSCG_TRAINEE_RATING_SYNC_ENABLED false until the native rating model, primary connection and ownership marker are proven. During initial rehearsal or emergency shutdown set TRAINING_INSTRUCTION_DELIVERY_ENABLED=false and stop the applicable workers before rolling back. P06 does not lift any P05 release hold.
+
 ## 1. Preflight and backups
 
 1. Record the exact commit, branch, lockfile and previous bot release. From the reviewed checkout run `git status --short --branch`, `git rev-parse HEAD`, `npm ci`, and `bash scripts/test-training-release.sh` on Node 24. Keep the evidence. The legacy deploy helper checks out main and assumes a particular filesystem and PM2 process. Use the verified release and supervisor.

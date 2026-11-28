@@ -3,6 +3,7 @@ require('dotenv').config();
 
 const commands = [
   require('./commands/training').definition.toJSON(),
+  require('./commands/trainingConfig').definition.toJSON(),
   require('./commands/qualification').definition.toJSON(),
   new SlashCommandBuilder().setName('myactivity').setDescription('Show pilot activity status and lifetime statistics')
     .addUserOption(o => o.setName('user').setDescription('Staff: linked Discord member to view').setRequired(false))

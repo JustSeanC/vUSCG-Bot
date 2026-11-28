@@ -13,5 +13,6 @@ module.exports = {
   cgasleaderboard: require('./cgasleaderboard'),
   help: require('./help'),
   training: require('./training'),
+  'training-config': require('./trainingConfig'),
   qualification: require('./qualification'),
 };

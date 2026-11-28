@@ -17,7 +17,7 @@ test('training slash definition exposes the six authorized workflows', () => {
   const definition = require('../commands').training.definition.toJSON();
   assert.equal(definition.name, 'training');
   assert.equal(definition.options[0].options.find(option => option.name === 'pirep_id').required, false);
-  assert.deepEqual(definition.options.map(({ name }) => name), ['record', 'progress', 'pilot', 'history', 'enroll', 'void', 'roster', 'stats', 'instructors']);
+  assert.deepEqual(definition.options.map(({ name }) => name), ['record', 'progress', 'pilot', 'history', 'enroll', 'materials', 'delivery', 'void', 'roster', 'stats', 'instructors']);
   assert.equal(command.canUse('enroll', true, id => id === 'command', roles), true);
   assert.equal(command.canUse('void', true, id => id === 'instructor', roles), false);
   assert.equal(command.canUse('record', true, id => id === 'instructor', roles), true);
@@ -122,7 +122,7 @@ test('wrong guild and unauthorized cross-pilot commands never touch storage', ()
     { action: 'history' },
     { action: 'pilot' },
     { action: 'void', role: 'instructor' },
-    { action: 'enroll', role: 'instructor' },
+    { action: 'enroll' },
   ]) {
     const { ctx, log } = context(options);
     await command.execute(ctx);

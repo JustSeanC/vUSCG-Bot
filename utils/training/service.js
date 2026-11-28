@@ -27,8 +27,9 @@ async function transaction(db, run) {
   }
 }
 
-async function findPilot(db, value) {
-  const pilot = await first(db, 'SELECT CAST(id AS CHAR) AS id, pilot_id, name FROM users WHERE pilot_id = ? LIMIT 1',
+async function findPilot(db, value, lock = false) {
+  const pilot = await first(db, `SELECT CAST(id AS CHAR) AS id, pilot_id, name FROM users
+    WHERE pilot_id = ? LIMIT 1${lock ? ' FOR UPDATE' : ''}`,
     [pilotNumber(value)]);
   if (!pilot) throw new TrainingError('That public pilot number is missing from phpVMS.');
   return pilot;
@@ -43,13 +44,15 @@ async function linkedPilot(db, interaction) {
 }
 
 async function linkedDiscordForPilot(db, pilotId) {
-  const [links] = await db.execute('SELECT discord_id FROM discord_links WHERE pilot_id = ? LIMIT 2', [pilotId]);
+  const [links] = await db.execute(`SELECT CAST(d.discord_id AS CHAR) AS discord_id FROM discord_links d
+    WHERE d.pilot_id=? AND NOT EXISTS (SELECT 1 FROM discord_links other
+      WHERE other.discord_id=d.discord_id AND other.pilot_id<>d.pilot_id) LIMIT 2`, [pilotId]);
   return links.length === 1 ? snowflake(links[0].discord_id) : null;
 }
 
-async function getProgram(db, programId) {
+async function getProgram(db, programId, lock = false) {
   const program = await first(db, `SELECT program_id, name FROM vuscg_training_programs
-    WHERE program_id = ? AND enabled = TRUE`, [code(programId, 'program')]);
+    WHERE program_id = ? AND enabled = TRUE${lock ? ' FOR SHARE' : ''}`, [code(programId, 'program')]);
   if (!program) throw new TrainingError('That training program is unavailable.');
   return program;
 }
@@ -94,26 +97,32 @@ async function previewEvaluation(db, pilotId, input) {
   return { pilot, lesson, data };
 }
 
-async function setEnrollment(db, { userId, programId, active, actor }) {
+// Call with the user's primary row locked. This shares lock ordering with native delivery.
+async function writeEnrollment(connection, { userId, programId, active, actor }) {
   const discordId = snowflake(actor.discordId);
   const instructor = pilotNumber(actor.pilotId);
+  const program = await getProgram(connection, programId, true);
+  const existing = await booking(connection, userId, programId, true);
+  if (!existing) {
+    if (!active) throw new TrainingError('This pilot has no enrollment in that program to pause.');
+    await connection.execute(`INSERT INTO vuscg_training_enrollments
+      (user_id, program_id, active, created_at, updated_at, created_by_discord_id, created_by_pilot_id,
+       updated_by_discord_id, updated_by_pilot_id)
+      VALUES (?, ?, TRUE, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), ?, ?, ?, ?)`,
+    [userId, programId, discordId, instructor, discordId, instructor]);
+    return { kind: 'start', program };
+  }
+  if (Boolean(existing.active) === active) return { kind: 'unchanged', program };
+  await connection.execute(`UPDATE vuscg_training_enrollments SET active = ?, updated_at = UTC_TIMESTAMP(6),
+    updated_by_discord_id = ?, updated_by_pilot_id = ? WHERE user_id = ? AND program_id = ?`,
+  [active, discordId, instructor, userId, programId]);
+  return { kind: active ? 'resume' : 'pause', program };
+}
+
+async function setEnrollment(db, change) {
   return transaction(db, async connection => {
-    await getProgram(connection, programId);
-    if (active) {
-      await connection.execute(`INSERT INTO vuscg_training_enrollments
-        (user_id, program_id, active, created_at, updated_at, created_by_discord_id, created_by_pilot_id,
-         updated_by_discord_id, updated_by_pilot_id)
-        VALUES (?, ?, TRUE, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE user_id = vuscg_training_enrollments.user_id`,
-      [userId, programId, discordId, instructor, discordId, instructor]);
-    }
-    const existing = await booking(connection, userId, programId, true);
-    if (!existing) throw new TrainingError('This pilot has no enrollment in that program to pause.');
-    if (Boolean(existing.active) !== active) {
-      await connection.execute(`UPDATE vuscg_training_enrollments SET active = ?, updated_at = UTC_TIMESTAMP(6),
-        updated_by_discord_id = ?, updated_by_pilot_id = ? WHERE user_id = ? AND program_id = ?`,
-      [active, discordId, instructor, userId, programId]);
-    }
+    await first(connection, 'SELECT id FROM users WHERE id=? FOR UPDATE', [change.userId]);
+    return writeEnrollment(connection, change);
   });
 }
 
@@ -310,6 +319,6 @@ async function history(db, userId, limit, offset) {
 }
 
 module.exports = {
-  first, transaction, findPilot, linkedPilot, linkedDiscordForPilot, getProgram, acceptedPilot, previewEvaluation, setEnrollment, prepareRecord, inspectImport,
+  first, transaction, findPilot, linkedPilot, linkedDiscordForPilot, getProgram, acceptedPilot, previewEvaluation, setEnrollment, writeEnrollment, prepareRecord, inspectImport,
   createRecord, getRecord, voidRecord, progress, summarizeProgress, history,
 };
