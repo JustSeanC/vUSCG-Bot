@@ -1,0 +1,1695 @@
+diff --git a/app/Cron/Hourly/DeletePireps.php b/app/Cron/Hourly/DeletePireps.php
+index 4c75e409854bffc9d9e388851456be2bd9385f27..0a1225af2cf8fe0565a1cb2a225a0a2613da21d5 100644
+--- a/app/Cron/Hourly/DeletePireps.php
++++ b/app/Cron/Hourly/DeletePireps.php
+@@ -49,7 +49,9 @@ class DeletePireps extends Listener
+         /** @var Pirep $pirep */
+         foreach ($pireps as $pirep) {
+             Log::info('Cron: Deleting PIREP id='.$pirep->id.', state='.PirepState::label($state));
+-            $pirepSvc->delete($pirep);
++            $pirepSvc->deleteIfCurrent($pirep, static fn (Pirep $locked): bool =>
++                $locked->state === $state && $locked->created_at->lt($dt) && $locked->status !== PirepStatus::PAUSED
++            );
+         }
+     }
+ }
+diff --git a/app/Events/PirepFiled.php b/app/Events/PirepFiled.php
+index 05696c3716a0b0af13727861daa897bc69f178b1..5a6119d605606c437e8945b3bca001361da228d2 100644
+--- a/app/Events/PirepFiled.php
++++ b/app/Events/PirepFiled.php
+@@ -9,7 +9,7 @@ class PirepFiled extends Event
+ {
+     public Pirep $pirep;
+ 
+-    public function __construct(Pirep $pirep)
++    public function __construct(Pirep $pirep, public bool $underFilingLock = false)
+     {
+         $this->pirep = $pirep;
+     }
+diff --git a/app/Http/Controllers/Admin/PirepController.php b/app/Http/Controllers/Admin/PirepController.php
+index d4f285ab95f59cf402f2be6dec455f1f6fd370e7..29d83f4260840c4e90cdc47a0a32bb23407616af 100644
+--- a/app/Http/Controllers/Admin/PirepController.php
++++ b/app/Http/Controllers/Admin/PirepController.php
+@@ -3,6 +3,7 @@
+ namespace App\Http\Controllers\Admin;
+ 
+ use App\Contracts\Controller;
++use App\Exceptions\PirepError;
+ use App\Http\Requests\CreatePirepRequest;
+ use App\Http\Requests\UpdatePirepRequest;
+ use App\Models\Enums\PirepSource;
+@@ -195,14 +196,19 @@ class PirepController extends Controller
+     public function store(CreatePirepRequest $request): RedirectResponse
+     {
+         $attrs = $request->all();
+-        $pirep = $this->pirepRepo->create($attrs);
++        unset($attrs['vuscg_review_revision'], $attrs['vuscg_filing_pending']);
++        if (isset($attrs['state']) && (int) $attrs['state'] === PirepState::ACCEPTED) {
++            Flash::error('Create a pending PIREP and approve it separately to credit the flight.');
+ 
+-        $hours = (int) $attrs['hours'];
+-        $minutes = (int) $attrs['minutes'];
+-        $pirep->flight_time = Time::hoursToMinutes($hours) + $minutes;
++            return redirect()->back();
++        }
++        $attrs['flight_time'] = Time::hoursToMinutes((int) $attrs['hours']) + (int) $attrs['minutes'];
+ 
+-        $this->saveCustomFields($pirep, $request);
+-        $this->saveFares($pirep, $request);
++        (new Pirep())->getConnection()->transaction(function () use ($attrs, $request): void {
++            $pirep = $this->pirepRepo->create($attrs);
++            $this->saveCustomFields($pirep, $request);
++            $this->saveFares($pirep, $request);
++        }, 1);
+ 
+         Flash::success('Pirep saved successfully.');
+ 
+@@ -297,27 +303,31 @@ class PirepController extends Controller
+             return redirect(route('admin.pireps.index'));
+         }
+ 
+-        $orig_route = $pirep->route;
+-        $orig_flight_time = $pirep->flight_time;
+-
+-        $attrs = $request->all();
+-
+-        // Fix the time
+-        $attrs['flight_time'] = Time::init(
+-            $attrs['minutes'],
+-            $attrs['hours']
+-        )->getMinutes();
++        try {
++            $this->pirepSvc->withLockedPirep($id, function (Pirep $locked) use ($request): void {
++                $this->pirepSvc->assertEditable($locked);
++                $attrs = $request->all();
++                unset($attrs['state'], $attrs['vuscg_review_revision'], $attrs['vuscg_filing_pending']);
++                $attrs['flight_time'] = Time::init($attrs['minutes'], $attrs['hours'])->getMinutes();
++                $oldRoute = $locked->route;
++                $pirep = $locked->fill($attrs);
++                $this->pirepSvc->invalidateReview($pirep);
++                if (!$pirep->save()) {
++                    throw new PirepError($pirep, 'The PIREP update was declined.');
++                }
+ 
+-        $pirep = $this->pirepRepo->update($attrs, $id);
++                if ($pirep->route !== $oldRoute) {
++                    $this->pirepSvc->saveRoute($pirep);
++                }
++                $this->saveCustomFields($pirep, $request);
++                $this->saveFares($pirep, $request);
++            });
++        } catch (PirepError $error) {
++            Flash::error($error->getMessage());
+ 
+-        // A route change in the PIREP, so update the saved points in the ACARS table
+-        if ($pirep->route !== $orig_route) {
+-            $this->pirepSvc->saveRoute($pirep);
++            return redirect()->back();
+         }
+ 
+-        $this->saveCustomFields($pirep, $request);
+-        $this->saveFares($pirep, $request);
+-
+         Flash::success('Pirep updated successfully.');
+ 
+         return redirect(route('admin.pireps.index'));
+@@ -336,7 +346,17 @@ class PirepController extends Controller
+             return redirect(route('admin.pireps.index'));
+         }
+ 
+-        $this->pirepSvc->delete($pirep);
++        try {
++            if (!$this->pirepSvc->deleteIfCurrent($pirep)) {
++                Flash::error('The PIREP changed. Reload it before deleting.');
++
++                return redirect()->back();
++            }
++        } catch (PirepError $error) {
++            Flash::error($error->getMessage());
++
++            return redirect()->back();
++        }
+ 
+         Flash::success('Pirep deleted successfully.');
+ 
+@@ -348,17 +368,30 @@ class PirepController extends Controller
+      */
+     public function status(Request $request): View
+     {
+-        Log::info('PIREP state update call', [$request->toArray()]);
++        $id = (string) $request->route('id');
++        Log::info('PIREP state update call', ['pirep_id' => $id]);
+ 
+-        $pirep = $this->pirepRepo->findWithoutFail($request->id);
++        $conflict = false;
+         if ($request->isMethod('post')) {
+-            $new_status = (int) $request->post('new_status');
+-            $pirep = $this->pirepSvc->changeState($pirep, $new_status);
++            $target = $request->post('new_status');
++            $revision = $request->post('review_revision');
++            abort_if(!in_array($target, [PirepState::ACCEPTED, PirepState::REJECTED,
++                (string) PirepState::ACCEPTED, (string) PirepState::REJECTED], true), 422);
++            abort_if(!is_string($revision) || !preg_match('/\A(?:legacy|[a-f0-9]{32})\z/', $revision), 422);
++
++            [$pirep, $changed] = $this->pirepSvc->review($id, (int) $target, $revision);
++            abort_if(!$pirep, 404);
++            $conflict = !$changed && $pirep->state !== (int) $target;
++        } else {
++            $pirep = Pirep::query()->useWritePdo()->findOrFail($id);
+         }
+ 
+-        $pirep->refresh();
+-
+-        return view('admin.pireps.actions', ['pirep' => $pirep, 'on_edit_page' => false]);
++        return view('admin.pireps.actions', [
++            'pirep' => $pirep,
++            'on_edit_page' => $request->boolean('on_edit_page'),
++            'vuscgReviewRevision' => PirepService::reviewRevision($pirep),
++            'vuscgReviewConflict' => $conflict,
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/Api/PirepController.php b/app/Http/Controllers/Api/PirepController.php
+index f6ea5d916fe4e7470112eb60ecbaa84a46fed83e..2c203771520e37b75dc4067507f1bdff8a154433 100644
+--- a/app/Http/Controllers/Api/PirepController.php
++++ b/app/Http/Controllers/Api/PirepController.php
+@@ -22,6 +22,7 @@ use App\Models\Acars;
+ use App\Models\Enums\AcarsType;
+ use App\Models\Enums\PirepFieldSource;
+ use App\Models\Enums\PirepSource;
++use App\Models\Enums\PirepState;
+ use App\Models\Pirep;
+ use App\Models\PirepComment;
+ use App\Models\PirepFare;
+@@ -146,7 +147,7 @@ class PirepController extends Controller
+     /**
+      * @param string $id The PIREP ID
+      */
+-    public function get(string $id): PirepResource
++    public function get(string $id, bool $fromPrimary = false): PirepResource
+     {
+         $with = [
+             'aircraft',
+@@ -159,9 +160,9 @@ class PirepController extends Controller
+             'user',
+         ];
+ 
+-        $pirep = $this->pirepRepo
+-            ->with($with)
+-            ->find($id);
++        $pirep = $fromPrimary
++            ? Pirep::query()->useWritePdo()->with($with)->findOrFail($id)
++            : $this->pirepRepo->with($with)->find($id);
+ 
+         return new PirepResource($pirep);
+     }
+@@ -215,31 +216,16 @@ class PirepController extends Controller
+         /** @var User $user */
+         $user = Auth::user();
+ 
+-        /** @var Pirep $pirep */
+-        $pirep = Pirep::find($pirep_id);
+-        $this->checkCancelled($pirep);
+-        $this->checkReadOnly($pirep);
+-
+         $attrs = $this->parsePirep($request);
+         $attrs['user_id'] = Auth::id();
+-
+-        // If aircraft is being changed, see if this user is allowed to fly this aircraft
+-        if (array_key_exists('aircraft_id', $attrs)
+-            && setting('pireps.restrict_aircraft_to_rank', false)
+-        ) {
+-            $can_use_ac = $this->userSvc->aircraftAllowed($user, $pirep->aircraft_id);
+-            if (!$can_use_ac) {
+-                throw new AircraftPermissionDenied($user, $pirep->aircraft);
+-            }
+-        }
+-
+         $fields = $this->getFields($request);
+         $fares = $this->getFares($request);
+-        $pirep = $this->pirepSvc->update($pirep_id, $attrs, $fields, $fares);
++        $pirep = $this->pirepSvc->update($pirep_id, $attrs, $fields, $fares,
++            fn (Pirep $locked) => $this->validateWrite($locked, $user, $attrs));
+ 
+         event(new PirepUpdated($pirep));
+ 
+-        return $this->get($pirep->id);
++        return $this->get($pirep->id, fromPrimary: true);
+     }
+ 
+     /**
+@@ -258,45 +244,29 @@ class PirepController extends Controller
+         /** @var User $user */
+         $user = Auth::user();
+ 
+-        // Check if the status is cancelled...
+-        $pirep = Pirep::find($pirep_id);
+-        $this->checkCancelled($pirep);
+-        $this->checkReadOnly($pirep);
+-
+         $attrs = $this->parsePirep($request);
+-
+-        // If aircraft is being changed, see if this user is allowed to fly this aircraft
+-        if (array_key_exists('aircraft_id', $attrs)
+-            && setting('pireps.restrict_aircraft_to_rank', false)
+-        ) {
+-            $can_use_ac = $this->userSvc->aircraftAllowed($user, $pirep->aircraft_id);
+-            if (!$can_use_ac) {
+-                throw new AircraftPermissionDenied($user, $pirep->aircraft);
+-            }
+-        }
+-
++        $fields = $this->getFields($request);
++        $fares = $this->getFares($request);
+         try {
+-            $fields = $this->getFields($request);
+-            $fares = $this->getFares($request);
+-            $pirep = $this->pirepSvc->file($pirep, $attrs, $fields, $fares);
++            $pirep = $this->pirepSvc->fileAndSubmit($pirep_id, $attrs, $fields, $fares,
++                fn (Pirep $locked) => $this->validateWrite($locked, $user, $attrs));
+         } catch (\Exception $e) {
+             Log::error($e);
+ 
+             throw $e;
+         }
+ 
+-        // See if there there is any route data posted
+-        // If there isn't, then just write the route data from the
+-        // route that's been posted from the PIREP
+-        $w = ['pirep_id' => $pirep->id, 'type' => AcarsType::ROUTE];
+-        $count = Acars::where($w)->count(['id']);
+-        if ($count === 0) {
+-            $this->pirepSvc->saveRoute($pirep);
+-        }
+-
+-        $this->pirepSvc->submit($pirep);
++        return $this->get($pirep->id, fromPrimary: true);
++    }
+ 
+-        return $this->get($pirep->id);
++    private function validateWrite(Pirep $pirep, User $user, array $attrs): void
++    {
++        $this->checkCancelled($pirep);
++        $this->checkReadOnly($pirep);
++        if (array_key_exists('aircraft_id', $attrs) && setting('pireps.restrict_aircraft_to_rank', false)
++            && !$this->userSvc->aircraftAllowed($user, $attrs['aircraft_id'])) {
++            throw new AircraftPermissionDenied($user, $pirep->aircraft);
++        }
+     }
+ 
+     /**
+@@ -395,14 +365,15 @@ class PirepController extends Controller
+      */
+     public function finances_recalculate(string $id, Request $request): AnonymousResourceCollection
+     {
+-        $pirep = Pirep::find($id);
+-        $this->financeSvc->processFinancesForPirep($pirep);
+-
+-        $pirep->refresh();
+-
+-        $transactions = $this->journalRepo->getAllForObject($pirep);
++        return $this->pirepSvc->withLockedPirep($id, function (Pirep $pirep): AnonymousResourceCollection {
++            if ($pirep->state !== PirepState::ACCEPTED) {
++                throw new PirepError($pirep, 'Only an accepted PIREP can have its finances recalculated.');
++            }
++            $this->financeSvc->processFinancesForPirep($pirep);
++            $transactions = $this->journalRepo->getAllForObject($pirep);
+ 
+-        return JournalTransactionResource::collection($transactions['transactions']);
++            return JournalTransactionResource::collection($transactions['transactions']);
++        });
+     }
+ 
+     public function route_get(string $id, Request $request): AnonymousResourceCollection
+@@ -425,39 +396,38 @@ class PirepController extends Controller
+      */
+     public function route_post(string $id, RouteRequest $request): JsonResponse
+     {
+-        // Check if the status is cancelled...
+-        $pirep = Pirep::find($id);
+-        $this->checkCancelled($pirep);
+-
+-        Log::info('Posting ROUTE, pirep_id: '.$id);
+-
+-        // Delete the route before posting a new one
+-        Acars::where([
+-            'pirep_id' => $id,
+-            'type'     => AcarsType::ROUTE,
+-        ])->delete();
++        return $this->pirepSvc->withLockedPirep($id, function (Pirep $pirep) use ($id, $request): JsonResponse {
++            $this->checkCancelled($pirep);
++            Log::info('Posting ROUTE, pirep_id: '.$id);
++
++            // Delete the route before posting a new one
++            Acars::where([
++                'pirep_id' => $id,
++                'type'     => AcarsType::ROUTE,
++            ])->delete();
++
++            $count = 0;
++            $route = $request->post('route', []);
++            if (\count($route) === 0) {
++                return $this->message('No points to add');
++            }
+ 
+-        $count = 0;
+-        $route = $request->post('route', []);
+-        if (\count($route) === 0) {
+-            return $this->message('No points to add');
+-        }
++            foreach ($route as $position) {
++                $position['pirep_id'] = $id;
++                $position['type'] = AcarsType::ROUTE;
+ 
+-        foreach ($route as $position) {
+-            $position['pirep_id'] = $id;
+-            $position['type'] = AcarsType::ROUTE;
++                if (isset($position['id'])) {
++                    Acars::updateOrInsert(['id' => $position['id']], $position);
++                } else {
++                    $acars = Acars::create($position);
++                    $acars->save();
++                }
+ 
+-            if (isset($position['id'])) {
+-                Acars::updateOrInsert(['id' => $position['id']], $position);
+-            } else {
+-                $acars = Acars::create($position);
+-                $acars->save();
++                $count++;
+             }
+ 
+-            $count++;
+-        }
+-
+-        return $this->message($count.' points added', $count);
++            return $this->message($count.' points added', $count);
++        });
+     }
+ 
+     /**
+@@ -465,13 +435,11 @@ class PirepController extends Controller
+      */
+     public function route_delete(string $id, Request $request): JsonResponse
+     {
+-        $pirep = Pirep::find($id);
+-
+-        Acars::where([
+-            'pirep_id' => $id,
+-            'type'     => AcarsType::ROUTE,
+-        ])->delete();
++        return $this->pirepSvc->withLockedPirep($id, function (Pirep $pirep) use ($id): JsonResponse {
++            $this->checkCancelled($pirep);
++            Acars::where(['pirep_id' => $id, 'type' => AcarsType::ROUTE])->delete();
+ 
+-        return $this->message('Route deleted');
++            return $this->message('Route deleted');
++        });
+     }
+ }
+diff --git a/app/Listeners/DiversionHandler.php b/app/Listeners/DiversionHandler.php
+index f8c29651d98ecf8d9b3008b6c01f49e4accfc6c7..f46b42cb4bfdff0840c3724f063e10ba8d34e397 100644
+--- a/app/Listeners/DiversionHandler.php
++++ b/app/Listeners/DiversionHandler.php
+@@ -29,7 +29,7 @@ class DiversionHandler extends Listener // implements ShouldQueue
+      */
+     public function onPirepFiled(PirepFiled $event): void
+     {
+-        $this->pirepSvc->handleDiversion($event->pirep);
++        $this->pirepSvc->handleDiversion($event->pirep, $event->underFilingLock);
+     }
+ 
+     /**
+diff --git a/app/Notifications/NotificationEventsHandler.php b/app/Notifications/NotificationEventsHandler.php
+index 8f1856d5e8da9b3711f312b7fe3e4c61c3ba6597..9651dd7ea54aa64ae4875b0315328408cac0b758 100644
+--- a/app/Notifications/NotificationEventsHandler.php
++++ b/app/Notifications/NotificationEventsHandler.php
+@@ -18,6 +18,7 @@ use App\Models\Enums\UserState;
+ use App\Models\User;
+ use App\Notifications\Messages\UserRejected;
+ use App\Notifications\Notifiables\Broadcast;
++use App\Services\PirepAfterCommit;
+ use Exception;
+ use Illuminate\Auth\Events\Verified;
+ use Illuminate\Support\Collection;
+@@ -144,17 +145,21 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onUserStateChange(UserStateChanged $event): void
+     {
+-        Log::info('NotificationEvents::onUserStateChange: New user state='.$event->user->state);
+-
+-        if ($event->old_state === UserState::PENDING) {
+-            if ($event->user->state === UserState::ACTIVE) {
+-                $this->notifyUser($event->user, new Messages\UserRegistered($event->user));
+-            } elseif ($event->user->state === UserState::REJECTED) {
+-                $this->notifyUser($event->user, new UserRejected($event->user));
++        $snapshot = clone $event;
++        $snapshot->user = $event->user->withoutRelations();
++        PirepAfterCommit::notify($event->user, 'user_state', function () use ($snapshot): void {
++            Log::info('NotificationEvents::onUserStateChange: New user state='.$snapshot->user->state);
++
++            if ($snapshot->old_state === UserState::PENDING) {
++                if ($snapshot->user->state === UserState::ACTIVE) {
++                    $this->notifyUser($snapshot->user, new Messages\UserRegistered($snapshot->user));
++                } elseif ($snapshot->user->state === UserState::REJECTED) {
++                    $this->notifyUser($snapshot->user, new UserRejected($snapshot->user));
++                }
++            } elseif ($snapshot->old_state === UserState::ACTIVE) {
++                Log::info('User state change from active to ??');
+             }
+-        } elseif ($event->old_state === UserState::ACTIVE) {
+-            Log::info('User state change from active to ??');
+-        }
++        });
+     }
+ 
+     /**
+@@ -177,23 +182,27 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepStatusChange(PirepStatusChange $event): void
+     {
+-        Log::info('NotificationEvents::onPirepStatusChange: '.$event->pirep->id.' status changed');
+-
+-        $message_types = [
+-            PirepStatus::BOARDING,
+-            PirepStatus::PUSHBACK_TOW,
+-            PirepStatus::GRND_RTRN,
+-            PirepStatus::TAKEOFF,
+-            PirepStatus::LANDED,
+-            PirepStatus::DIVERTED,
+-            PirepStatus::CANCELLED,
+-            PirepStatus::PAUSED,
+-            PirepStatus::EMERG_DESCENT,
+-        ];
+-
+-        if (setting('notifications.discord_pirep_status', true) && in_array($event->pirep->status, $message_types, true)) {
+-            Notification::send([$event->pirep], new Messages\Broadcast\PirepStatusChanged($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_status', function () use ($snapshot): void {
++            Log::info('NotificationEvents::onPirepStatusChange: '.$snapshot->pirep->id.' status changed');
++
++            $message_types = [
++                PirepStatus::BOARDING,
++                PirepStatus::PUSHBACK_TOW,
++                PirepStatus::GRND_RTRN,
++                PirepStatus::TAKEOFF,
++                PirepStatus::LANDED,
++                PirepStatus::DIVERTED,
++                PirepStatus::CANCELLED,
++                PirepStatus::PAUSED,
++                PirepStatus::EMERG_DESCENT,
++            ];
++
++            if (setting('notifications.discord_pirep_status', true) && in_array($snapshot->pirep->status, $message_types, true)) {
++                Notification::send([$snapshot->pirep], new Messages\Broadcast\PirepStatusChanged($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -201,17 +210,21 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepFile(PirepFiled $event): void
+     {
+-        Log::info('NotificationEvents::onPirepFile: '.$event->pirep->id.' filed');
+-        if (setting('notifications.mail_pirep_admin', true)) {
+-            $this->notifyAdmins(new Messages\PirepFiled($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_filed', function () use ($snapshot): void {
++            Log::info('NotificationEvents::onPirepFile: '.$snapshot->pirep->id.' filed');
++            if (setting('notifications.mail_pirep_admin', true)) {
++                $this->notifyAdmins(new Messages\PirepFiled($snapshot->pirep));
++            }
+ 
+-        /*
+-         * Broadcast notifications
+-         */
+-        if (setting('notifications.discord_pirep_filed', true)) {
+-            Notification::send([$event->pirep], new Messages\Broadcast\PirepFiled($event->pirep));
+-        }
++            /*
++             * Broadcast notifications
++             */
++            if (setting('notifications.discord_pirep_filed', true)) {
++                Notification::send([$snapshot->pirep], new Messages\Broadcast\PirepFiled($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -219,10 +232,14 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepAccepted(PirepAccepted $event): void
+     {
+-        if (setting('notifications.mail_pirep_user_ack', true)) {
+-            Log::info('NotificationEvents::onPirepAccepted: '.$event->pirep->id.' accepted');
+-            $this->notifyUser($event->pirep->user, new Messages\PirepAccepted($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_accepted', function () use ($snapshot): void {
++            if (setting('notifications.mail_pirep_user_ack', true)) {
++                Log::info('NotificationEvents::onPirepAccepted: '.$snapshot->pirep->id.' accepted');
++                $this->notifyUser($snapshot->pirep->user, new Messages\PirepAccepted($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -230,10 +247,14 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepRejected(PirepRejected $event): void
+     {
+-        if (setting('notifications.mail_pirep_user_rej', true)) {
+-            Log::info('NotificationEvents::onPirepRejected: '.$event->pirep->id.' rejected');
+-            $this->notifyUser($event->pirep->user, new Messages\PirepRejected($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_rejected', function () use ($snapshot): void {
++            if (setting('notifications.mail_pirep_user_rej', true)) {
++                Log::info('NotificationEvents::onPirepRejected: '.$snapshot->pirep->id.' rejected');
++                $this->notifyUser($snapshot->pirep->user, new Messages\PirepRejected($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -273,12 +294,16 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onAwardAwarded(AwardAwarded $event): void
+     {
+-        /*
+-         * Broadcast notifications
+-         */
+-        if (setting('notifications.discord_award_awarded', true)) {
+-            Notification::send([$event->userAward], new Messages\Broadcast\AwardAwarded($event->userAward));
+-        }
++        $snapshot = clone $event;
++        $snapshot->userAward = $event->userAward->withoutRelations();
++        PirepAfterCommit::notify($event->userAward, 'award_awarded', function () use ($snapshot): void {
++            /*
++             * Broadcast notifications
++             */
++            if (setting('notifications.discord_award_awarded', true)) {
++                Notification::send([$snapshot->userAward], new Messages\Broadcast\AwardAwarded($snapshot->userAward));
++            }
++        });
+     }
+ 
+     /**
+@@ -286,11 +311,15 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onUserStatsChanged(UserStatsChanged $event): void
+     {
+-        /*
+-         * Broadcast notifications
+-         */
+-        if (setting('notifications.discord_user_rank_changed', true) && $event->stat_name === 'rank') {
+-            Notification::send([$event->user], new Messages\Broadcast\UserRankChanged($event->user));
+-        }
++        $snapshot = clone $event;
++        $snapshot->user = $event->user->withoutRelations();
++        PirepAfterCommit::notify($event->user, 'user_stats', function () use ($snapshot): void {
++            /*
++             * Broadcast notifications
++             */
++            if (setting('notifications.discord_user_rank_changed', true) && $snapshot->stat_name === 'rank') {
++                Notification::send([$snapshot->user], new Messages\Broadcast\UserRankChanged($snapshot->user));
++            }
++        });
+     }
+ }
+diff --git a/app/Services/AircraftService.php b/app/Services/AircraftService.php
+index 86a431d516b941fe845059d21e384fefa2e1d69f..58e459c482d0123f465cfa76d85ae2d1678f36e9 100644
+--- a/app/Services/AircraftService.php
++++ b/app/Services/AircraftService.php
+@@ -15,13 +15,22 @@ class AircraftService extends Service
+      */
+     public function recalculateStats()
+     {
+-        $allAircraft = Aircraft::where('status', AircraftStatus::ACTIVE)->get(); // TODO: Soft delete
+-        foreach ($allAircraft as $aircraft) {
+-            $pirep_time_total = Pirep::where('aircraft_id', $aircraft->id)
+-                ->where('state', PirepState::ACCEPTED)
+-                ->sum('flight_time');
+-            $aircraft->flight_time = $pirep_time_total;
+-            $aircraft->save();
++        $model = new Aircraft();
++        $connection = $model->getConnection();
++        if ($connection !== (new Pirep())->getConnection() || $connection->transactionLevel() !== 0) {
++            throw new \RuntimeException('Aircraft recount requires its own transaction on the PIREP primary.');
++        }
++
++        foreach ($model->newQuery()->useWritePdo()->where('status', AircraftStatus::ACTIVE)->pluck('id') as $id) {
++            $connection->transaction(static function () use ($model, $id): void {
++                $aircraft = $model->newQuery()->whereKey($id)->lockForUpdate()->first();
++                if (!$aircraft || $aircraft->status !== AircraftStatus::ACTIVE) {
++                    return;
++                }
++                $aircraft->flight_time = Pirep::where('aircraft_id', $id)
++                    ->where('state', PirepState::ACCEPTED)->sum('flight_time');
++                $aircraft->save();
++            }, 1);
+         }
+     }
+ }
+diff --git a/app/Services/PirepAfterCommit.php b/app/Services/PirepAfterCommit.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..23ecdb7b1e2ceb1445f401301f8c6929c17659d2
+--- /dev/null
++++ b/app/Services/PirepAfterCommit.php
+@@ -0,0 +1,32 @@
++<?php
++
++namespace App\Services;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Support\Facades\Log;
++use Throwable;
++
++final class PirepAfterCommit
++{
++    public static function notify(Model $context, string $kind, callable $send): void
++    {
++        $connection = $context->getConnection();
++        if ($connection->transactionLevel() === 0) {
++            $send();
++
++            return;
++        }
++
++        $id = $context->getKey();
++        $connection->afterCommit(static function () use ($kind, $id, $send): void {
++            try {
++                $send();
++            } catch (Throwable $error) {
++                // Never turn a committed accounting operation into a reported failure.
++                Log::warning('Post-commit notification failed', [
++                    'kind' => $kind, 'record_id' => $id, 'exception_type' => get_class($error),
++                ]);
++            }
++        });
++    }
++}
+diff --git a/app/Services/PirepService.php b/app/Services/PirepService.php
+index ae71e302f54051a58678b4ca4f1cca2c5650edbb..2d32ad06b93c7e7836ea519308f360f0d49bca35 100644
+--- a/app/Services/PirepService.php
++++ b/app/Services/PirepService.php
+@@ -40,6 +40,7 @@ use App\Repositories\FlightRepository;
+ use App\Repositories\PirepRepository;
+ use App\Support\Units\Fuel;
+ use Carbon\Carbon;
++use Illuminate\Database\Eloquent\Model;
+ use Illuminate\Database\Eloquent\ModelNotFoundException;
+ use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Facades\Log;
+@@ -48,6 +49,8 @@ use Nwidart\Modules\Facades\Module;
+ 
+ class PirepService extends Service
+ {
++    public const VUSCG_REVIEW_PROTOCOL = 1;
++
+     public function __construct(
+         private readonly AirportRepository $airportRepo,
+         private readonly AirportService $airportSvc,
+@@ -60,6 +63,76 @@ class PirepService extends Service
+         private readonly UserService $userSvc
+     ) {}
+ 
++    /**
++     * Serialize writes using the primary, in the order PIREP -> pilot -> aircraft.
++     * A caller must not acquire either participant lock before calling this method.
++     * Run once: do not replay synchronous listeners on a timeout or deadlock.
++     */
++    public function withLockedPirep(string $id, callable $work, bool $required = true): mixed
++    {
++        $model = new Pirep();
++        $connection = $model->getConnection();
++        if ($connection !== DB::connection()) {
++            throw new \RuntimeException('PIREP and native listeners must share the primary connection.');
++        }
++
++        return $connection->transaction(function () use ($model, $id, $work, $required) {
++            $pirep = $model->newQuery()->whereKey($id)->lockForUpdate()->first();
++            if (!$pirep || (string) $pirep->getKey() !== $id) {
++                if (!$required) {
++                    return $work(null);
++                }
++                throw (new ModelNotFoundException())->setModel(Pirep::class, [$id]);
++            }
++            if (!array_key_exists('vuscg_review_revision', $pirep->getAttributes()) ||
++                !array_key_exists('vuscg_filing_pending', $pirep->getAttributes())) {
++                throw new \RuntimeException('The vUSCG PIREP concurrency schema is required.');
++            }
++
++            return $work($pirep);
++        }, 1);
++    }
++
++    private function lockAccountingModels(Pirep $pirep, bool $requireAircraft = true): array
++    {
++        $pilot = $pirep->user();
++        $aircraft = $pirep->aircraft();
++        foreach ([$pilot, $aircraft] as $relation) {
++            if ($relation->getRelated()->getConnection() !== $pirep->getConnection()) {
++                throw new \RuntimeException('PIREP accounting models must share the primary connection.');
++            }
++        }
++        $lockedPilot = $pilot->lockForUpdate()->firstOrFail();
++        $lockedAircraft = $requireAircraft ? $aircraft->lockForUpdate()->firstOrFail() : $aircraft->lockForUpdate()->first();
++        $pirep->setRelation('user', $lockedPilot)->setRelation('aircraft', $lockedAircraft);
++
++        return [$lockedPilot, $lockedAircraft];
++    }
++
++    public static function reviewRevision(Pirep $pirep): string
++    {
++        return $pirep->getRawOriginal('vuscg_review_revision') ?? 'legacy';
++    }
++
++    public function invalidateReview(Pirep $pirep): void
++    {
++        $pirep->vuscg_review_revision = bin2hex(random_bytes(16));
++    }
++
++    public function assertEditable(Pirep $pirep): void
++    {
++        if ($pirep->state === PirepState::ACCEPTED) {
++            throw new PirepError($pirep, 'Reject the accepted PIREP before editing or deleting its accounting inputs.');
++        }
++    }
++
++    private function withoutReviewFields(array $attrs): array
++    {
++        unset($attrs['state'], $attrs['vuscg_review_revision'], $attrs['vuscg_filing_pending']);
++
++        return $attrs;
++    }
++
+     /**
+      * Create a prefiled PIREP
+      *
+@@ -71,6 +144,7 @@ class PirepService extends Service
+      */
+     public function prefile(User $user, array $attrs, array $fields = [], array $fares = []): Pirep
+     {
++        $attrs = $this->withoutReviewFields($attrs);
+         $attrs['user_id'] = $user->id;
+         $attrs['state'] = PirepState::IN_PROGRESS;
+ 
+@@ -185,6 +259,23 @@ class PirepService extends Service
+      * @param array PirepFieldValue[] $field_values
+      */
+     public function create(Pirep $pirep, array $fields = []): Pirep
++    {
++        if (!$pirep->exists) {
++            return $pirep->getConnection()->transaction(fn () => $this->createUnderLock($pirep, $fields), 1);
++        }
++
++        return $this->withLockedPirep((string) $pirep->getKey(), function (Pirep $locked) use ($pirep, $fields): Pirep {
++            if ($locked->read_only || self::reviewRevision($locked) !== self::reviewRevision($pirep)) {
++                throw new PirepError($locked, 'PIREP changed during editing. Reload it before saving.');
++            }
++            $locked->fill($this->withoutReviewFields($pirep->getDirty()));
++            $this->invalidateReview($locked);
++
++            return $this->createUnderLock($locked, $fields);
++        });
++    }
++
++    private function createUnderLock(Pirep $pirep, array $fields): Pirep
+     {
+         if (empty($fields)) {
+             $fields = [];
+@@ -213,6 +304,9 @@ class PirepService extends Service
+         }
+ 
+         $pirep->status = PirepStatus::ARRIVED;
++        if (!$pirep->exists && $pirep->state === PirepState::PENDING) {
++            $pirep->vuscg_filing_pending = 1;
++        }
+ 
+         // Copy some fields over from Flight/SimBrief if we have it
+         if ($pirep->flight) {
+@@ -223,7 +317,7 @@ class PirepService extends Service
+         $pirep->save();
+         $pirep->refresh();
+ 
+-        $this->updateCustomFields($pirep->id, $fields);
++        $this->saveCustomFieldsUnderLock($pirep->id, $fields);
+ 
+         return $pirep;
+     }
+@@ -235,13 +329,23 @@ class PirepService extends Service
+      * @throws \Prettus\Validator\Exceptions\ValidatorException
+      * @throws \Exception
+      */
+-    public function update(string $pirep_id, array $attrs, array $fields = [], array $fares = []): Pirep
++    public function update(string $pirep_id, array $attrs, array $fields = [], array $fares = [], ?callable $validate = null): Pirep
+     {
+-        $pirep = $this->pirepRepo->update($attrs, $pirep_id);
+-        $this->updateCustomFields($pirep_id, $fields);
+-        $this->fareSvc->saveToPirep($pirep, $fares);
++        return $this->withLockedPirep($pirep_id, function (Pirep $pirep) use ($attrs, $fields, $fares, $validate): Pirep {
++            if ($validate) {
++                $validate($pirep);
++            }
++            if ($pirep->read_only) {
++                throw new PirepError($pirep, 'PIREP is read-only');
++            }
++            $pirep->fill($this->withoutReviewFields($attrs));
++            $this->invalidateReview($pirep);
++            $this->persistLocked($pirep);
++            $this->saveCustomFieldsUnderLock($pirep->id, $fields);
++            $this->fareSvc->saveToPirep($pirep, $fares);
+ 
+-        return $pirep;
++            return $pirep;
++        });
+     }
+ 
+     /**
+@@ -253,6 +357,26 @@ class PirepService extends Service
+      * @throws \Exception
+      */
+     public function file(Pirep $pirep, array $attrs = [], array $fields = [], array $fares = []): Pirep
++    {
++        return $this->withLockedPirep((string) $pirep->getKey(),
++            fn (Pirep $locked) => $this->fileUnderLock($locked, $attrs, $fields, $fares));
++    }
++
++    public function fileAndSubmit(string $id, array $attrs, array $fields, array $fares, callable $validate): Pirep
++    {
++        return $this->withLockedPirep($id, function (Pirep $pirep) use ($attrs, $fields, $fares, $validate): Pirep {
++            $validate($pirep);
++            $pirep = $this->fileUnderLock($pirep, $attrs, $fields, $fares);
++            if (!Acars::where(['pirep_id' => $pirep->id, 'type' => AcarsType::ROUTE])->lockForUpdate()->first(['id'])) {
++                $this->saveRoute($pirep);
++            }
++            $this->submitUnderLock($pirep);
++
++            return $pirep->newQuery()->whereKey($pirep->getKey())->lockForUpdate()->firstOrFail();
++        });
++    }
++
++    private function fileUnderLock(Pirep $pirep, array $attrs, array $fields, array $fares): Pirep
+     {
+         if (empty($fields)) {
+             $fields = [];
+@@ -266,16 +390,21 @@ class PirepService extends Service
+             PirepState::REJECTED,
+         ], true);
+ 
+-        if ($is_already_submitted) {
++        if ($is_already_submitted || $pirep->state === PirepState::DELETED) {
+             throw new PirepError($pirep, 'PIREP has already been submitted');
+         }
+ 
++        $attrs = $this->withoutReviewFields($attrs);
++        $attrs['user_id'] = $pirep->user_id;
+         $attrs['state'] = PirepState::PENDING;
+         $attrs['status'] = PirepStatus::ARRIVED;
+         $attrs['submitted_at'] = Carbon::now('UTC');
+ 
+-        $this->pirepRepo->update($attrs, $pirep->id);
+-        $pirep->refresh();
++        $pirep->fill($attrs);
++        $this->lockAccountingModels($pirep, requireAircraft: false);
++        $pirep->vuscg_filing_pending = 1;
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+         // Check if there is a simbrief_id, change it to be set to the PIREP
+         // at the end of the flight when it's been filed
+@@ -309,10 +438,10 @@ class PirepService extends Service
+             $pirep->planned_flight_time = $pirep->flight->flight_time;
+         }
+ 
+-        $pirep->save();
++        $this->persistLocked($pirep);
+         $pirep->refresh();
+ 
+-        $this->updateCustomFields($pirep->id, $fields);
++        $this->saveCustomFieldsUnderLock($pirep->id, $fields);
+         $this->fareSvc->saveToPirep($pirep, $fares);
+ 
+         return $pirep;
+@@ -425,6 +554,18 @@ class PirepService extends Service
+      */
+     public function submit(Pirep $pirep)
+     {
++        $this->withLockedPirep((string) $pirep->getKey(), fn (Pirep $locked) => $this->submitUnderLock($locked));
++    }
++
++    private function submitUnderLock(Pirep $pirep): void
++    {
++        if (!in_array($pirep->state, [PirepState::DRAFT, PirepState::IN_PROGRESS], true) &&
++            ($pirep->state !== PirepState::PENDING || !$pirep->vuscg_filing_pending)) {
++            return;
++        }
++
++        [$pilot, $aircraft] = $this->lockAccountingModels($pirep, requireAircraft: false);
++        $aircraftId = $pirep->aircraft_id;
+         // Check if there is a simbrief_id, change it to be set to the PIREP
+         // at the end of the flight when it's been submitted finally.
+         // Prefile, Save (as draft) and File already have this but the Submit button
+@@ -438,37 +579,39 @@ class PirepService extends Service
+             }
+         }
+ 
+-        Log::info('New PIREP filed, pirep_id: '.$pirep->id);
+-        event(new PirepFiled($pirep));
++        // The auto-rejection listener must run before the rank auto-approval check.
++        $pirep->state = PirepState::PENDING;
++        $pirep->vuscg_filing_pending = 0;
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+-        $pirep->refresh();
++        Log::info('New PIREP filed, pirep_id: '.$pirep->id);
++        event(new PirepFiled($pirep, underFilingLock: true));
++
++        // Locking reads remain current even if an enclosing transaction already has a read snapshot.
++        $pirep = $pirep->newQuery()->whereKey($pirep->getKey())->lockForUpdate()->firstOrFail();
++        if ((string) $pirep->user_id !== (string) $pilot->getKey() ||
++            (string) $pirep->aircraft_id !== (string) $aircraftId ||
++            !in_array($pirep->state, [PirepState::PENDING, PirepState::REJECTED], true)) {
++            throw new \RuntimeException('Unexpected native PirepFiled identity or state change.');
++        }
++        // Reload the locked rows after synchronous listeners, including diversion updates.
++        $pirep->setRelation('user', $pilot->newQuery()->whereKey($pilot->getKey())->lockForUpdate()->firstOrFail());
++        $pirep->setRelation('aircraft', $aircraft ? $aircraft->newQuery()->whereKey($aircraft->getKey())->lockForUpdate()->firstOrFail() : null);
++        if ($pirep->state === PirepState::REJECTED) {
++            event(new PirepRejected($pirep));
+ 
+-        // Figure out what pirep state should be, if nothing provided yet.
+-        if ($pirep->state != PirepState::ACCEPTED && $pirep->state != PirepState::REJECTED) {
+-            $default_state = PirepState::PENDING;
+-        } else {
+-            $default_state = $pirep->state;
++            return;
+         }
+ 
+-        // If pirep is still at PENDING or DRAFT state decide the default behavior by looking at rank settings
+-        if ($pirep->state === PirepState::PENDING || $pirep->state === PirepState::DRAFT) {
+-            if ($pirep->source === PirepSource::ACARS && $pirep->user->rank->auto_approve_acars) {
+-                $default_state = PirepState::ACCEPTED;
+-            } elseif ($pirep->source === PirepSource::MANUAL && $pirep->user->rank->auto_approve_manual) {
+-                $default_state = PirepState::ACCEPTED;
++        $rank = $pirep->user->rank;
++        if (($pirep->source === PirepSource::ACARS && $rank?->auto_approve_acars) ||
++            ($pirep->source === PirepSource::MANUAL && $rank?->auto_approve_manual)) {
++            if (!$aircraft) {
++                throw new PirepError($pirep, 'A valid aircraft is required for flight credit.');
+             }
++            $this->acceptUnderLock($pirep);
+         }
+-
+-        // only update the pilot last state if they are accepted
+-        if ($default_state === PirepState::ACCEPTED) {
+-            $pirep = $this->accept($pirep);
+-        } elseif ($default_state === PirepState::REJECTED) {
+-            $pirep = $this->reject($pirep);
+-        } else {
+-            $pirep->state = $default_state;
+-        }
+-
+-        $pirep->save();
+     }
+ 
+     /**
+@@ -478,6 +621,11 @@ class PirepService extends Service
+      * @throws \Prettus\Validator\Exceptions\ValidatorException
+      */
+     public function cancel(Pirep $pirep): Pirep
++    {
++        return $this->withLockedPirep((string) $pirep->getKey(), fn (Pirep $locked) => $this->cancelUnderLock($locked));
++    }
++
++    private function cancelUnderLock(Pirep $pirep): Pirep
+     {
+         if (in_array($pirep->state, Pirep::$cancel_states, true)) {
+             Log::info('PIREP '.$pirep->id.' can\'t be cancelled, state='.$pirep->state);
+@@ -485,11 +633,12 @@ class PirepService extends Service
+             throw new PirepCancelNotAllowed($pirep);
+         }
+ 
+-        $pirep = $this->pirepRepo->update([
+-            'state'  => PirepState::CANCELLED,
+-            'status' => PirepStatus::CANCELLED,
+-        ], $pirep->id);
++        $pirep->state = PirepState::CANCELLED;
++        $pirep->status = PirepStatus::CANCELLED;
+ 
++        $pirep->vuscg_filing_pending = 0;
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+         event(new PirepCancelled($pirep));
+ 
+         return $pirep;
+@@ -508,6 +657,30 @@ class PirepService extends Service
+      */
+     public function delete(Pirep $pirep): void
+     {
++        $this->deleteIfCurrent($pirep);
++    }
++
++    public function deleteIfCurrent(Pirep $pirep, ?callable $eligible = null): bool
++    {
++        return $this->withLockedPirep((string) $pirep->getKey(), function (?Pirep $locked) use ($pirep, $eligible): bool {
++            if (!$locked || self::reviewRevision($pirep) !== self::reviewRevision($locked) ||
++                $locked->state !== (int) $pirep->getRawOriginal('state') || ($eligible && !$eligible($locked))) {
++                return false;
++            }
++            $this->assertEditable($locked);
++            $this->deleteUnderLock($locked);
++
++            return true;
++        }, false);
++    }
++
++    private function deleteUnderLock(Pirep $pirep): void
++    {
++        $pilot = $pirep->user();
++        if ($pilot->getRelated()->getConnection() !== $pirep->getConnection()) {
++            throw new \RuntimeException('PIREP and pilot must share the primary connection.');
++        }
++        $user = $pilot->lockForUpdate()->firstOrFail();
+         $user_id = $pirep->user_id;
+ 
+         $w = ['pirep_id' => $pirep->id];
+@@ -522,7 +695,6 @@ class PirepService extends Service
+             ->latest('submitted_at')
+             ->first();
+ 
+-        $user = User::find($user_id);
+         $user->last_pirep_id = !empty($last_pirep) ? $last_pirep->id : null;
+         $user->save();
+     }
+@@ -533,6 +705,16 @@ class PirepService extends Service
+      * @param PirepFieldValue[] $field_values
+      */
+     public function updateCustomFields(string $pirep_id, array $field_values): void
++    {
++        $this->withLockedPirep($pirep_id, function (Pirep $pirep) use ($field_values): void {
++            $this->assertEditable($pirep);
++            $this->saveCustomFieldsUnderLock($pirep->id, $field_values);
++            $this->invalidateReview($pirep);
++            $pirep->save();
++        });
++    }
++
++    private function saveCustomFieldsUnderLock(string $pirep_id, array $field_values): void
+     {
+         if (!$field_values || empty($field_values)) {
+             return;
+@@ -551,70 +733,56 @@ class PirepService extends Service
+      */
+     public function changeState(Pirep $pirep, int $new_state): Pirep
+     {
+-        Log::info('PIREP '.$pirep->id.' state change from '.$pirep->state.' to '.$new_state);
+-
+-        if ($pirep->state === $new_state) {
+-            return $pirep;
++        [$report] = $this->review((string) $pirep->getKey(), $new_state, self::reviewRevision($pirep));
++        if (!$report) {
++            throw (new ModelNotFoundException())->setModel(Pirep::class, [$pirep->getKey()]);
+         }
+ 
+-        /*
+-         * Move from a PENDING status into either ACCEPTED or REJECTED
+-         */
+-        if ($pirep->state === PirepState::PENDING) {
+-            if ($new_state === PirepState::ACCEPTED) {
+-                return $this->accept($pirep);
+-            }
++        return $report;
++    }
+ 
+-            if ($new_state === PirepState::REJECTED) {
+-                return $this->reject($pirep);
++    /**
++     * A missing revision permits pending review only, never an administrative reversal.
++     * Return the authoritative report and whether this request performed accounting.
++     *
++     * @return array{?Pirep, bool}
++     */
++    public function review(string $id, int $target, ?string $revision = null): array
++    {
++        return $this->withLockedPirep($id, function (?Pirep $locked) use ($target, $revision): array {
++            if ($locked === null || $locked->state === $target || $locked->vuscg_filing_pending ||
++                !in_array($target, [PirepState::ACCEPTED, PirepState::REJECTED], true) ||
++                !in_array($locked->state, [PirepState::PENDING, PirepState::ACCEPTED, PirepState::REJECTED], true) ||
++                ($revision === null ? $locked->state !== PirepState::PENDING : self::reviewRevision($locked) !== $revision)) {
++                return [$locked, false];
+             }
+ 
+-            return $pirep;
+-        }
+-
+-        /*
+-         * Move from a ACCEPTED to REJECTED status
+-         */
+-        if ($pirep->state === PirepState::ACCEPTED) {
+-            $pirep = $this->reject($pirep);
+-
+-            return $pirep;
+-        }
+-
+-        /*
+-         * Move from REJECTED to ACCEPTED
+-         */
+-        if ($pirep->state === PirepState::REJECTED) {
+-            $pirep = $this->accept($pirep);
+-
+-            return $pirep;
+-        }
++            $this->lockAccountingModels($locked,
++                requireAircraft: $target === PirepState::ACCEPTED || $locked->state === PirepState::ACCEPTED);
+ 
+-        return $pirep->refresh();
++            return [$target === PirepState::ACCEPTED
++                ? $this->acceptUnderLock($locked) : $this->rejectUnderLock($locked), true];
++        }, false);
+     }
+ 
+-    /**
+-     * @throws \Exception
+-     */
+     public function accept(Pirep $pirep): Pirep
+     {
+-        // moving from a REJECTED state to ACCEPTED, reconcile statuses
+-        if ($pirep->state === PirepState::ACCEPTED) {
+-            return $pirep;
+-        }
++        return $this->changeState($pirep, PirepState::ACCEPTED);
++    }
+ 
++    private function acceptUnderLock(Pirep $pirep): Pirep
++    {
+         $ft = $pirep->flight_time;
+         $pilot = $pirep->user;
+ 
+-        $this->userSvc->adjustFlightTime($pilot, $ft);
+-        $this->userSvc->adjustFlightCount($pilot, +1);
+-        $this->userSvc->calculatePilotRank($pilot);
+-        $pirep->user->refresh();
++        $this->userSvc->adjustFlightTime($pilot, $ft, refresh: false);
++        $this->userSvc->adjustFlightCount($pilot, +1, refresh: false);
++        $this->userSvc->calculatePilotRank($pilot, refresh: false);
+ 
+         // Change the status
+         $pirep->state = PirepState::ACCEPTED;
+-        $pirep->save();
+-        $pirep->refresh();
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+         Log::info('PIREP '.$pirep->id.' state change to ACCEPTED');
+ 
+@@ -626,11 +794,9 @@ class PirepService extends Service
+         $pirep->aircraft->airport_id = $pirep->arr_airport_id;
+         $pirep->aircraft->landing_time = $pirep->updated_at;
+         $pirep->aircraft->fuel_onboard = $fuel_on_board;
+-        $pirep->aircraft->save();
+-
+-        $pirep->refresh();
++        $this->persistLocked($pirep->aircraft);
+ 
+-        $this->setPilotState($pilot, $pirep);
++        $this->setPilotStateUnderLock($pilot, $pirep);
+         event(new PirepAccepted($pirep));
+         event(new ProcessAward($pirep->user));
+ 
+@@ -638,6 +804,11 @@ class PirepService extends Service
+     }
+ 
+     public function reject(Pirep $pirep): Pirep
++    {
++        return $this->changeState($pirep, PirepState::REJECTED);
++    }
++
++    private function rejectUnderLock(Pirep $pirep): Pirep
+     {
+         // If this was previously ACCEPTED, then reconcile the flight hours
+         // that have already been counted, etc
+@@ -645,19 +816,18 @@ class PirepService extends Service
+             $user = $pirep->user;
+             $ft = $pirep->flight_time * -1;
+ 
+-            $this->userSvc->adjustFlightTime($user, $ft);
+-            $this->userSvc->adjustFlightCount($user, -1);
+-            $this->userSvc->calculatePilotRank($user);
+-            $pirep->user->refresh();
++            $this->userSvc->adjustFlightTime($user, $ft, refresh: false);
++            $this->userSvc->adjustFlightCount($user, -1, refresh: false);
++            $this->userSvc->calculatePilotRank($user, refresh: false);
+ 
+             $pirep->aircraft->flight_time -= $pirep->flight_time;
+-            $pirep->aircraft->save();
++            $this->persistLocked($pirep->aircraft);
+         }
+ 
+         // Change the status
+         $pirep->state = PirepState::REJECTED;
+-        $pirep->save();
+-        $pirep->refresh();
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+         Log::info('PIREP '.$pirep->id.' state change to REJECTED');
+ 
+@@ -668,19 +838,51 @@ class PirepService extends Service
+ 
+     public function setPilotState(User $pilot, Pirep $pirep)
+     {
+-        $pilot->refresh();
++        $this->withLockedPirep((string) $pirep->getKey(), function (Pirep $locked) use ($pilot): void {
++            [$current] = $this->lockAccountingModels($locked);
++            if ($current->getKey() !== $pilot->getKey() || $locked->state !== PirepState::ACCEPTED) {
++                throw new PirepError($locked, 'Pilot position requires the current accepted PIREP and pilot.');
++            }
++            $this->setPilotStateUnderLock($current, $locked);
++        });
++    }
+ 
++    private function setPilotStateUnderLock(User $pilot, Pirep $pirep): void
++    {
+         $previous_airport = $pilot->curr_airport_id;
+         $pilot->curr_airport_id = $pirep->arr_airport_id;
+         $pilot->last_pirep_id = $pirep->id;
+-        $pilot->save();
+-
+-        $pirep->refresh();
++        $this->persistLocked($pilot);
+ 
+         event(new UserStatsChanged($pilot, 'airport', $previous_airport));
+     }
+ 
+-    public function handleDiversion(Pirep $pirep): void
++    private function persistLocked(Model $model): void
++    {
++        if (!$model->save()) {
++            throw new \RuntimeException('A native model declined a PIREP write.');
++        }
++    }
++
++    public function handleDiversion(Pirep $pirep, bool $underFilingLock = false): void
++    {
++        if ($underFilingLock) {
++            if ($pirep->getConnection()->transactionLevel() === 0) {
++                throw new \RuntimeException('PIREP diversion requires the filing transaction.');
++            }
++            $this->handleDiversionUnderLock($pirep);
++
++            return;
++        }
++
++        $this->withLockedPirep((string) $pirep->getKey(), function (Pirep $locked): void {
++            $this->assertEditable($locked);
++            $this->lockAccountingModels($locked);
++            $this->handleDiversionUnderLock($locked);
++        });
++    }
++
++    private function handleDiversionUnderLock(Pirep $pirep): void
+     {
+         // Return if diversion handling is disabled
+         if (!setting('pireps.handle_diversion', false)) {
+@@ -761,7 +963,9 @@ class PirepService extends Service
+         }
+ 
+         if (setting('notifications.discord_pirep_diverted', false)) {
+-            Notification::send([$pirep], new PirepDiverted($pirep));
++            $snapshot = $pirep->withoutRelations();
++            PirepAfterCommit::notify($pirep, 'pirep_diverted',
++                static fn () => Notification::send([$snapshot], new PirepDiverted($snapshot)));
+         }
+ 
+         // Update aircraft position
+@@ -771,13 +975,15 @@ class PirepService extends Service
+         $user->update(['curr_airport_id' => $diversion_airport->id]);
+ 
+         // Update pirep details
+-        $pirep->update([
++        $this->invalidateReview($pirep);
++        $pirep->fill([
+             'notes'          => 'DIVERTED FROM '.$pirep->arr_airport_id.' TO '.$diversion_airport->id.' '.$pirep->notes,
+             'alt_airport_id' => $pirep->arr_airport_id, // Save intended dest as alternate for fixing it back when needed
+             'arr_airport_id' => $diversion_airport->id, // Use diversion dest as the new arrival
+             'flight_id'      => null, // Remove the flight id to drop the relationship
+             'route_leg'      => null, // Remove the route_leg to exclude this pirep from tour checks
+         ]);
++        $this->persistLocked($pirep);
+ 
+         Log::info('Pirep '.$pirep->id.' Flight '.$pirep->ident.' DIVERTED to '.$diversion_airport->id.', assets MOVED to Diversion Airport');
+     }
+diff --git a/app/Services/UserService.php b/app/Services/UserService.php
+index d86e1fa8ccdc82015fa9eb8d3459ca4fae5ce493..57a2a5d6eb0982fa8606992b3aa76f00d616d1f0 100644
+--- a/app/Services/UserService.php
++++ b/app/Services/UserService.php
+@@ -387,12 +387,16 @@ class UserService extends Service
+      * Adjust the number of flights a user has. Triggers
+      * UserStatsChanged event
+      */
+-    public function adjustFlightCount(User $user, int $count): User
++    public function adjustFlightCount(User $user, int $count, bool $refresh = true): User
+     {
+-        $user->refresh();
++        if ($refresh) {
++            $user->refresh();
++        }
+         $old_value = $user->flights;
+         $user->flights += $count;
+-        $user->save();
++        if (!$user->save()) {
++            throw new \RuntimeException('Native pilot counter update was declined.');
++        }
+ 
+         event(new UserStatsChanged($user, 'flights', $old_value));
+ 
+@@ -402,11 +406,15 @@ class UserService extends Service
+     /**
+      * Update a user's flight times
+      */
+-    public function adjustFlightTime(User $user, int $minutes): User
++    public function adjustFlightTime(User $user, int $minutes, bool $refresh = true): User
+     {
+-        $user->refresh();
++        if ($refresh) {
++            $user->refresh();
++        }
+         $user->flight_time += $minutes;
+-        $user->save();
++        if (!$user->save()) {
++            throw new \RuntimeException('Native pilot counter update was declined.');
++        }
+ 
+         return $user;
+     }
+@@ -414,9 +422,11 @@ class UserService extends Service
+     /**
+      * See if a pilot's rank has change. Triggers the UserStatsChanged event
+      */
+-    public function calculatePilotRank(User $user): User
++    public function calculatePilotRank(User $user, bool $refresh = true): User
+     {
+-        $user->refresh();
++        if ($refresh) {
++            $user->refresh();
++        }
+ 
+         // If their current rank is one they were assigned, then
+         // don't change away from it automatically.
+@@ -454,7 +464,9 @@ class UserService extends Service
+ 
+         // Only trigger the event/update if there's been a change
+         if ($user->rank_id !== $original_rank_id) {
+-            $user->save();
++            if (!$user->save()) {
++                throw new \RuntimeException('Native pilot rank update was declined.');
++            }
+             $user->refresh();
+             event(new UserStatsChanged($user, 'rank', $old_rank));
+         }
+@@ -499,28 +511,24 @@ class UserService extends Service
+      */
+     public function recalculateStats(User $user): User
+     {
+-        // Recalc their hours
+-        $w = [
+-            'user_id' => $user->id,
+-            'state'   => PirepState::ACCEPTED,
+-        ];
+-
+-        $pirep_count = Pirep::where($w)->count();
+-        $user->flights = $pirep_count;
+-
+-        $flight_time = Pirep::where($w)->sum('flight_time');
+-        $user->flight_time = $flight_time;
+-
+-        $user->save();
+-
+-        // Recalc the rank
+-        $this->calculatePilotRank($user);
+-
+-        Log::info('User '.$user->ident.' updated; pirep count='.$pirep_count.', rank='.$user->rank->name.', flight_time='.$user->flight_time.' minutes');
++        $connection = $user->getConnection();
++        if ($connection !== (new Pirep())->getConnection() || $connection->transactionLevel() !== 0) {
++            throw new \RuntimeException('Pilot recount requires its own transaction on the PIREP primary.');
++        }
+ 
+-        $user->save();
++        return $connection->transaction(function () use ($user): User {
++            $user = $user->newQuery()->whereKey($user->getKey())->lockForUpdate()->firstOrFail();
++            // First consistent read after acquiring the same pilot lock as a review.
++            $totals = Pirep::where(['user_id' => $user->id, 'state' => PirepState::ACCEPTED])
++                ->selectRaw('COUNT(*) AS flights, COALESCE(SUM(flight_time), 0) AS minutes')->toBase()->first();
++            $user->flights = (int) $totals->flights;
++            $user->flight_time = (int) $totals->minutes;
++            $user->save();
++            $this->calculatePilotRank($user, refresh: false);
++            Log::info('User '.$user->ident.' updated; pirep count='.$user->flights.', rank='.$user->rank->name.', flight_time='.$user->flight_time.' minutes');
+ 
+-        return $user;
++            return $user;
++        }, 1);
+     }
+ 
+     /**
+diff --git a/modules/DisposableBasic/Listeners/Gen_AutoReject.php b/modules/DisposableBasic/Listeners/Gen_AutoReject.php
+index 2bbb8ee2c2b09c53ec83c9644831cefe3caebb8b..5e2e9290fb7d602590d88648329ef0c02ec79529 100644
+--- a/modules/DisposableBasic/Listeners/Gen_AutoReject.php
++++ b/modules/DisposableBasic/Listeners/Gen_AutoReject.php
+@@ -14,6 +14,13 @@ class Gen_AutoReject
+ {
+     public function handle(PirepFiled $event)
+     {
++        $pirep = $event->pirep;
++        $connection = $pirep->getConnection();
++        if (!$event->underFilingLock || $connection->transactionLevel() === 0 || $pirep->state !== PirepState::PENDING) {
++            // This listener may only write during the synchronous, locked submission.
++            return;
++        }
++
+         $auto_reject = DB_Setting('dbasic.autoreject', false);
+ 
+         $margin_score = DB_Setting('dbasic.ar_marginscore', 0);
+@@ -46,7 +53,6 @@ class Gen_AutoReject
+         }
+ 
+         // Get the pirep and aircraft
+-        $pirep = $event->pirep;
+         $aircraft = $pirep->aircraft;
+ 
+         $pirep_comments = [];
+@@ -55,7 +61,7 @@ class Gen_AutoReject
+ 
+         // Reduce Fuel Burn margin for piston powered aircraft (12566 pounds is 5700 kg // ICAO definition max takeoff weight for small aircraft)
+         $piston_powered = Aircraft::where('mtow', '<', 12566)->groupBy('icao')->pluck('icao')->toArray();
+-        if (in_array(strtoupper($aircraft->icao), $piston_powered)) {
++        if ($aircraft && in_array(strtoupper($aircraft->icao), $piston_powered)) {
+             Log::info('Disposable Basic | Reducing Fuel Consumption Margin For Pirep:'.$pirep->id.' Reported Aircraft ICAO:'.$aircraft->icao);
+             $margin_fburn = round($margin_fburn / 10, 0);
+         }
+@@ -188,13 +194,15 @@ class Gen_AutoReject
+ 
+         // Write Comments
+         if (is_countable($pirep_comments) && count($pirep_comments) > 0) {
+-            DB::table('pirep_comments')->insert($pirep_comments);
++            $connection->table('pirep_comments')->insert($pirep_comments);
+         }
+ 
+         // Write Pirep State (REJECT ONLY)
+         if (isset($pirep_state)) {
+             $pirep->state = $pirep_state;
+-            $pirep->save();
++            if (!$pirep->save()) {
++                throw new \RuntimeException('DisposableBasic PIREP rejection was declined.');
++            }
+         }
+     }
+ }
+diff --git a/resources/views/admin/pireps/actions.blade.php b/resources/views/admin/pireps/actions.blade.php
+index 6c3b22c49c29436503513351671609d838186bc7..240c3650016e6dca46305cbfc374c127a9d83ee6 100644
+--- a/resources/views/admin/pireps/actions.blade.php
++++ b/resources/views/admin/pireps/actions.blade.php
+@@ -1,3 +1,9 @@
++<div data-vuscg-pirep-review
++     data-vuscg-pirep-id="{{ $pirep->id }}"
++     data-vuscg-review-mode="{{ $on_edit_page ? 'detail' : 'list' }}"
++     data-vuscg-current-state="{{ $pirep->state }}"
++     data-vuscg-review-conflict="{{ !empty($vuscgReviewConflict) ? '1' : '0' }}">
++  @include('admin.pireps.vuscg_review_revision')
+ <table class="table" style="border-style: hidden; margin-bottom: 0; padding:0;background-color:transparent;">
+   <tr style="border-style: hidden;">
+     @if ($pirep->state === PirepState::PENDING || $pirep->state === PirepState::REJECTED)
+@@ -50,3 +56,4 @@
+     </td>
+   </tr>
+ </table>
++</div>
+diff --git a/resources/views/admin/pireps/scripts.blade.php b/resources/views/admin/pireps/scripts.blade.php
+index da7ba90a985f28fc8f0a90dcb2d77fbc08773bab..5d94254e50b40ae18a52978fc92cae95233fca8a 100644
+--- a/resources/views/admin/pireps/scripts.blade.php
++++ b/resources/views/admin/pireps/scripts.blade.php
+@@ -1,16 +1,76 @@
+ @section('scripts')
+   <script>
+-    const changeStatus = async (values, fn) => {
+-      console.log('Changing PIREP ' + values.pirep_id + ' to state ' + values.new_status);
++    const reviewSelector = '[data-vuscg-pirep-review]';
++    const reviewRevision = (review) => {
++      const input = review.find('input[name="review_revision"]');
++      const value = input.val();
++      return input.length === 1 && typeof value === 'string' && /^(?:legacy|[a-f0-9]{32})$/.test(value)
++        ? value : null;
++    };
++    const reviewStates = {
++      '{{ App\Models\Enums\PirepState::IN_PROGRESS }}': ['badge badge-info', 'In progress'],
++      '{{ App\Models\Enums\PirepState::PENDING }}': ['badge badge-warning', 'Pending'],
++      '{{ App\Models\Enums\PirepState::ACCEPTED }}': ['badge badge-success', 'Accepted'],
++      '{{ App\Models\Enums\PirepState::CANCELLED }}': ['badge badge-secondary', 'Cancelled'],
++      '{{ App\Models\Enums\PirepState::DELETED }}': ['badge badge-secondary', 'Deleted'],
++      '{{ App\Models\Enums\PirepState::DRAFT }}': ['badge badge-secondary', 'Draft'],
++      '{{ App\Models\Enums\PirepState::REJECTED }}': ['badge badge-danger', 'Rejected'],
++      '{{ App\Models\Enums\PirepState::PAUSED }}': ['badge badge-warning', 'Paused'],
++    };
+ 
+-      const opts = {
+-        method: 'POST',
+-        url: '{{url('/admin/pireps')}}/' + values.pirep_id + '/status',
+-        data: values,
++    const submitStatusReview = async (event, detail) => {
++      event.preventDefault();
++      const form = $(event.currentTarget);
++      const review = form.closest(reviewSelector);
++      const revision = reviewRevision(review);
++      const id = form.attr('pirep_id');
++      const mode = detail ? 'detail' : 'list';
++      const action = form.attr('action');
++      if (!revision || !action || !id || review.attr('data-vuscg-pirep-id') !== id ||
++          review.attr('data-vuscg-review-mode') !== mode) {
++        window.alert('PIREP review information is missing. Reload the page before trying again.');
++        return;
++      }
++      if (review.data('vuscgSubmitting')) return;
++
++      const values = {
++        pirep_id: id,
++        new_status: form.attr('new_status'),
++        review_revision: revision,
++        on_edit_page: detail,
+       };
+-
+-      const response = await phpvms.request(opts);
+-      fn(response.data);
++      const csrf = form.find('input[name="_token"]').val();
++      if (csrf) values._token = csrf;
++
++      review.data('vuscgSubmitting', true);
++      review.find('button[type="submit"]').prop('disabled', true);
++      try {
++        const response = await phpvms.request({ method: 'POST', url: action, data: values });
++        if (typeof response.data !== 'string') throw new Error('Unexpected PIREP review response');
++        const returned = $('<div>').append($.parseHTML(response.data)).find(reviewSelector);
++        const state = returned.attr('data-vuscg-current-state');
++        const conflict = returned.attr('data-vuscg-review-conflict');
++        if (returned.length !== 1 || returned.attr('data-vuscg-pirep-id') !== id ||
++            returned.attr('data-vuscg-review-mode') !== mode || !reviewRevision(returned) ||
++            !Object.prototype.hasOwnProperty.call(reviewStates, state) || !['0', '1'].includes(conflict)) {
++          throw new Error('Invalid PIREP actionbar');
++        }
++
++        const [badgeClass, stateLabel] = reviewStates[state];
++        returned.find('[data-vuscg-conflict-state]').text(stateLabel);
++        review.replaceWith(returned);
++        const badge = $(document.getElementById('pirep_' + id + '_status_container')).children().first();
++        badge.removeClass().addClass(badgeClass).text(stateLabel);
++
++        if (detail && conflict === '0') {
++          returned.find('button[type="submit"]').prop('disabled', true);
++          window.location.reload();
++        }
++      } catch (error) {
++        console.error('PIREP review request failed', error);
++        // Keep this actionbar disabled until reload because the write may have committed.
++        window.alert('The PIREP decision could not be confirmed. Reload the page and verify its current state before retrying.');
++      }
+     };
+ 
+     $(document).ready(() => {
+@@ -54,50 +114,11 @@
+       });
+ 
+       $(document).on('submit', 'form.pirep_submit_status', (event) => {
+-        event.preventDefault();
+-        const values = {
+-          pirep_id: $(event.currentTarget).attr('pirep_id'),
+-          new_status: $(event.currentTarget).attr('new_status')
+-        };
+-
+-        console.log('change status', values);
+-
+-        changeStatus(values, (data) => {
+-          const destContainer = '#pirep_' + values.pirep_id + '_actionbar';
+-          $(destContainer).html(data);
+-
+-          const statusContainer = '#pirep_' + values.pirep_id + '_status_container';
+-          let new_badge;
+-          let new_badge_text;
+-
+-          if (values.new_status === '{{ App\Models\Enums\PirepState::ACCEPTED }}') {
+-            new_badge = 'badge badge-success';
+-            new_badge_text = 'Accepted'
+-          }
+-
+-          if (values.new_status === '{{ App\Models\Enums\PirepState::REJECTED }}') {
+-            new_badge = 'badge badge-danger';
+-            new_badge_text = 'Rejected'
+-          }
+-
+-          $(statusContainer).children(0).removeClass().addClass(new_badge);
+-          $(statusContainer).children(0).html(new_badge_text);
+-        });
++        submitStatusReview(event, false);
+       });
+ 
+       $(document).on('submit', 'form.pirep_change_status', (event) => {
+-        event.preventDefault();
+-
+-        const values = {
+-          pirep_id: $(event.currentTarget).attr('pirep_id'),
+-          new_status: $(event.currentTarget).attr('new_status')
+-        };
+-
+-        console.log('change status', values);
+-
+-        changeStatus(values, (data) => {
+-          location.reload();
+-        });
++        submitStatusReview(event, true);
+       });
+ 
+     });
+diff --git a/resources/views/admin/pireps/vuscg_review_revision.blade.php b/resources/views/admin/pireps/vuscg_review_revision.blade.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b4076470557783f116fb8013fda6de15429541e
+--- /dev/null
++++ b/resources/views/admin/pireps/vuscg_review_revision.blade.php
+@@ -0,0 +1,9 @@
++{{-- Include inside each PIREP action group. Give the group the data-vuscg-pirep-review attribute. --}}
++<input type="hidden" name="review_revision"
++       value="{{ $vuscgReviewRevision ?? \App\Services\PirepService::reviewRevision($pirep) }}">
++@if (!empty($vuscgReviewConflict))
++    <p role="status">
++        This PIREP changed before your decision was saved.
++        Current state is <strong data-vuscg-conflict-state></strong>. Review the available actions and choose again.
++    </p>
++@endif
