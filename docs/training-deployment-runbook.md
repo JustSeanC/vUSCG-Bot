@@ -4,6 +4,8 @@ Use the [P05 release verdict](training-p05-readiness.md) as the production gate.
 
 For P06 releases, also follow the [P06 installation and staging procedure](training-p06.md). Apply migration 008 before registering new training commands. Keep VUSCG_TRAINEE_RATING_SYNC_ENABLED false until the native rating model, primary connection and ownership marker are proven. During initial rehearsal or emergency shutdown set TRAINING_INSTRUCTION_DELIVERY_ENABLED=false and stop the applicable workers before rolling back. P06 does not lift any P05 release hold.
 
+P07 adds a distinct training schema path for MySQL 5.7.44. Follow the read-only version/schema preflight and the staging import gate before any migration. [Compatibility audit](training-p07-mysql57-compatibility.md) · [phpMyAdmin staging procedure](training-p07-phpmyadmin-installation.md)
+
 ## 1. Preflight and backups
 
 1. Record the exact commit, branch, lockfile and previous bot release. From the reviewed checkout run `git status --short --branch`, `git rev-parse HEAD`, `npm ci`, and `bash scripts/test-training-release.sh` on Node 24. Keep the evidence. The legacy deploy helper checks out main and assumes a particular filesystem and PM2 process. Use the verified release and supervisor.
@@ -28,7 +30,7 @@ For P06 releases, also follow the [P06 installation and staging procedure](train
 
 ## 2. Database migration ledger
 
-MySQL 8.4 and InnoDB are the tested baseline. Record the commit, checksum and exact statements applied. MySQL DDL can lock tables and statements can commit independently. Budget index builds and table alteration time on representative staging data. Inspect the schema after partial failures before retrying. Keep DDL privileges out of runtime accounts.
+MySQL 5.7.44 and MySQL 8.4 with InnoDB are tested with distinct training migration paths. Record the commit, checksum and exact statements applied. MySQL DDL can lock tables and statements can commit independently. Budget index builds and table alteration time on representative staging data. Inspect the schema after partial failures before retrying. Keep DDL privileges out of runtime accounts.
 
 | File | Dependencies and privileges | Changes and repeat behavior |
 | --- | --- | --- |
@@ -36,20 +38,21 @@ MySQL 8.4 and InnoDB are the tested baseline. Record the commit, checksum and ex
 | 002 CGAS historical | 001 and ALTER | Adds optional historical campaign fields. Apply once if used. Does not itself queue the campaign. |
 | 003 CGAS native award | 001 and ALTER/INDEX | Adds native CGAS delivery columns. Apply once if used. Previously detected completions can queue after enabling CGAS delivery. Pause the worker before separately scheduling a rollout. |
 | [Bridge nonces](../integrations/phpvms7/bridge-nonces.sql) | CREATE and indexes | Creates the durable HMAC nonce table. Repeat preserves rows. Bridge runtime needs INSERT and approved expiry cleanup needs DELETE. Use the retention window in the P01 guide. |
-| [004](../migrations/004_training_records.sql) | CREATE, indexes, REFERENCES, seed INSERT/UPDATE | Creates programs, lessons, enrollments, and records. FKs stay within training. Checks, JSON, identical key definitions and UTC timestamps are required. Rerunning preserves edited rows and seeds. |
-| [005](../migrations/005_training_pirep_link.sql) | 004 and ALTER/INDEX | Extends the training source enum, replaces the source CHECK and creates a generated-column uniqueness index. One-time, with potential rebuild and metadata locks. |
-| [006](../migrations/006_training_qualifications.sql) | 004–005, CREATE, indexes, REFERENCES, seed INSERT/UPDATE | Adds catalog, immutable events, status projection, import staging and delivery audit/outbox. FKs stay within training. Repeat preserves rows and scopes. |
+| [004 (8.4)](../migrations/004_training_records.sql) or [004 (5.7)](../migrations/mysql57/004_training_records.sql) | CREATE, indexes, REFERENCES, seed INSERT/UPDATE | Creates programs, lessons, enrollments, and records. FKs stay within training. 5.7 adds the integrity guard and final source enum. Verify the source and void CHECKs or guard FKs for the selected profile. Rerunning preserves edited rows and seeds. |
+| [005 (8.4)](../migrations/005_training_pirep_link.sql) or [005 (5.7)](../migrations/mysql57/005_training_pirep_link.sql) | 004 and ALTER/INDEX | Both add the generated-column uniqueness index. The 8.4 file also extends the enum and replaces the source CHECK. One-time, with potential rebuild and metadata locks. |
+| [006 (8.4)](../migrations/006_training_qualifications.sql) or [006 (5.7)](../migrations/mysql57/006_training_qualifications.sql) | 004–005, CREATE, indexes, REFERENCES, seed INSERT/UPDATE | Adds catalog, immutable events, status projection, import staging and delivery audit/outbox. FKs stay within training. 5.7 uses guard FKs for actor and revoke reason. Repeat preserves rows and scopes. |
 | [007](../migrations/007_training_native_ownership.sql) | 006 and positively verified native pivots, ALTER/INDEX | Adds a nullable unique ownership marker to each opted-in pivot. Existing assignments remain unmarked. Apply each statement once, individually. Review storage, metadata locks and whether native models can safely preserve the marker. |
+| [008](../migrations/008_training_materials_and_delivery.sql) | 004–006, CREATE, INDEX, REFERENCES, seed INSERT/UPDATE | Adds categories, links, event snapshots and delivery audits. Repeat preserves records and configuration. 007 is required only for the enabled native targets. |
 
-Apply only verified, unapplied statements. For a fresh training schema run from the reviewed bot checkout:
+Apply only verified, unapplied statements. For a fresh training schema, set `TRAINING_MIGRATION_DIR` to the path returned by the preflight (`migrations/mysql57` on 5.7.44 or `migrations` on 8.4). For each file, verify the server, selected staging schema and previous step before running its command from the reviewed checkout:
 
 ~~~bash
-mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < migrations/004_training_records.sql
-mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < migrations/005_training_pirep_link.sql
-mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < migrations/006_training_qualifications.sql
+mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < "$TRAINING_MIGRATION_DIR/004_training_records.sql"
+mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < "$TRAINING_MIGRATION_DIR/005_training_pirep_link.sql"
+mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < "$TRAINING_MIGRATION_DIR/006_training_qualifications.sql"
 ~~~
 
-Apply the bridge nonce schema separately before authenticated staging calls. Apply each verified 007 ALTER from the committed file separately, with the targets disabled. Record partial completion and compare the preflight and SHOW CREATE TABLE after each statement. A different pivot or Laravel authorization model blocks that target. Existing deployments should inventory 001–003 and preserve CGAS data.
+Apply the bridge nonce schema separately before authenticated staging calls. Apply each verified 007 ALTER from the committed file separately, with the targets disabled. Record partial completion and compare the preflight and SHOW CREATE TABLE after each statement. A different pivot or Laravel authorization model blocks that target. Existing deployments should inventory 001–003 and preserve CGAS data. Apply 008 after 006 and any approved 007 statements. Keep strict mode and foreign-key enforcement enabled on application sessions. Follow the linked P07 recovery procedure if root 004 or 006 was previously run on 5.7.
 
 The website models and queue must share the same primary. Runtime users need scoped read and write access for the features they run. Native permissions are limited to verified assignments and ownership-filtered deletion. Rank graduation needs the reviewed rank-update permission. Validate counts, scopes, replay keys, checks, and markers against the baseline. Example post-migration read-only queries:
 
@@ -72,7 +75,7 @@ The state/event mismatch result must be empty. Review duplicate or missing links
 
 1. Back up VuscgCustom and its configuration. For bridge testing, copy the approved bridge controller, Services/PirepDecisionGate.php and config/vuscg_pirep_review.php to their matching paths. Merge the bridge route group into the installed API file and preserve unrelated module routes. Verify HTTPS trusted proxies, path prefix, body limits, UTC clocks, nonce expiry and rate limits. Supply a dedicated secret through environment settings.
 2. Copy the approved Console/SyncQualifications.php, Services/QualificationNativePlan.php and config/vuscg_qualifications.php to their matching paths. Merge console registration in the installed provider as described in the [P04 guide](training-p04.md). Use the verified existing native model/event APIs and retain all other module functionality.
-3. Keep PIREP_BRIDGE_DECISIONS_ENABLED, VUSCG_QUALIFICATION_SYNC_ENABLED, VUSCG_TYPE_RATING_SYNC_ENABLED, and VUSCG_IP_ROLE_SYNC_ENABLED false. Keep schedules stopped. In the verified phpVMS installation directory run:
+3. Keep PIREP_BRIDGE_DECISIONS_ENABLED, VUSCG_QUALIFICATION_SYNC_ENABLED, VUSCG_TYPE_RATING_SYNC_ENABLED, VUSCG_IP_ROLE_SYNC_ENABLED, and VUSCG_TRAINEE_RATING_SYNC_ENABLED false. Keep schedules stopped. In the verified phpVMS installation directory run:
 
    ~~~bash
    php artisan config:clear

@@ -1,5 +1,7 @@
 # P05 release readiness
 
+The subsequent P07 audit adds a verified disposable MySQL 5.7.44 path. The production holds recorded below still apply. [P07 compatibility audit](training-p07-mysql57-compatibility.md)
+
 **Verdict — BLOCKED — CRITICAL ISSUES**
 
 P01–P04 were audited together on develop/training-system. P05 supports a controlled rehearsal with isolated staging credentials. Production approval remains blocked by the uncoordinated native writers. Production qualification delivery and graduation also lack installed-model, inventory and live Discord evidence. [Staging, deployment and rollback runbook](training-deployment-runbook.md)

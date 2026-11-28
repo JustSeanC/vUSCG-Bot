@@ -342,7 +342,7 @@ See [P06 enrollment and training resources](docs/training-p06.md) for instructor
 
 ## Training release readiness
 
-See the [P05 readiness report](docs/training-p05-readiness.md) and [deployment runbook](docs/training-deployment-runbook.md) before cutover.
+Use the version-specific migration profile for MySQL 5.7.44 or 8.4. P05 production holds remain in effect. [P07 compatibility audit](docs/training-p07-mysql57-compatibility.md) · [phpMyAdmin staging installation](docs/training-p07-phpmyadmin-installation.md) · [P05 readiness](docs/training-p05-readiness.md) · [Deployment runbook](docs/training-deployment-runbook.md)
 
 ## Test and deployment workflow
 

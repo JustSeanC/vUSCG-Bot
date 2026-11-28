@@ -35,7 +35,7 @@ async function authorize(ctx, change) {
 
 async function catalogEntry(db, qualification, program, action, lock = false) {
   const row = await first(db, `SELECT name, scope, enabled FROM vuscg_training_qualifications
-    WHERE qualification_id = ?${lock ? ' FOR SHARE' : ''}`, [code(qualification, 'qualification')]);
+    WHERE qualification_id = ?${lock ? ' LOCK IN SHARE MODE' : ''}`, [code(qualification, 'qualification')]);
   if (!row || (action === 'grant' && !row.enabled)) throw new TrainingError('That qualification is unavailable.');
   if (qualification === 'mr' && !['rw', 'fw'].includes(program)) {
     throw new TrainingError('Mission Rated requires an explicit rw or fw program.');
@@ -155,7 +155,7 @@ async function commitConfirmedChange(ctx, change, original, policy = validateGra
         }
       }
       return { id: eventId, created: true };
-    });
+    }, { qualifications: true });
   } catch (error) {
     if (error instanceof TrainingError) throw error;
     const durable = await readReceipt(db, id, change, actor).catch(receiptError => {

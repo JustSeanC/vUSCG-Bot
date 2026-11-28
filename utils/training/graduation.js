@@ -2,6 +2,7 @@ const { PermissionFlagsBits } = require('discord.js');
 const { createHash } = require('node:crypto');
 const { formatRankNickname } = require('../../rankSync');
 const { first, transaction, linkedDiscordForPilot } = require('./service');
+const { requireTrainingIntegrity } = require('./schema');
 const { findTrainingThread } = require('./threads');
 
 const lease = 'vuscg:mr:graduation';
@@ -38,7 +39,7 @@ async function promoteRank(db, event, rankName) {
     [event.user_id, event.public_pilot_id, event.program_id, event.event_id, event.graduate_discord_id]);
     if (result.affectedRows === 1) await checkpoint(connection, event.event_id, 'rank_advanced_to_13');
     return result.affectedRows === 1;
-  });
+  }, { qualifications: true });
 }
 
 async function updateDiscord(member, pilot, program, roles) {
@@ -123,6 +124,7 @@ async function graduate(db, client, guildId, job) {
 async function runGraduations(client, db, guildId) {
   const connection = await db.getConnection();
   try {
+    await requireTrainingIntegrity(connection, { qualifications: true });
     const result = await first(connection, 'SELECT GET_LOCK(?, 0) AS acquired', [lease]);
     if (!result.acquired) return;
     try {

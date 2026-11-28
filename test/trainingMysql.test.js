@@ -1,4 +1,7 @@
 const { test } = require('node:test');
+const fs = require('node:fs');
+const { tickWatcher } = require('../utils/pendingPireps');
+const { requireTrainingIntegrity } = require('../utils/training/schema');
 const assert = require('node:assert/strict');
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
@@ -19,16 +22,26 @@ const trainingConfig = require('../commands/trainingConfig');
 const activate = require('../commands/activate');
 
 const port = process.env.TRAINING_TEST_MYSQL_PORT;
+const version = process.env.TRAINING_TEST_MYSQL_VERSION;
 const actor = { discordId: '123456789012345678', pilotId: 11 };
 
-test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TEST_MYSQL_PORT for an empty local fixture database' }, async t => {
+test(`Training against disposable MySQL ${version ?? ''}`.trim(), { skip: !port && 'Set the fixture port and expected version' }, async t => {
   assert.match(port, /^[0-9]+$/);
+  assert.ok(['5.7.44', '8.4'].includes(version), 'Set TRAINING_TEST_MYSQL_VERSION to the expected server');
+  const mysql57 = version === '5.7.44';
+  const sql = relative => readFile(path.join(__dirname, '..', relative), 'utf8');
+  const phaseSql = file => sql(`migrations/${mysql57 ? 'mysql57/' : ''}${file}`);
   const db = mysql.createPool({
     host: '127.0.0.1', port: Number(port),
     database: 'vuscg_training_test', user: 'training_test', password: 'training_test_local_only',
     connectionLimit: 5, multipleStatements: true, timezone: '-08:00',
   });
   t.after(() => db.end());
+
+  const [[{ detected }]] = await db.query('SELECT VERSION() AS detected');
+  assert.match(detected, mysql57 ? /^5[.]7[.]44(?:-|$)/ : /^8[.]4[.]/);
+  assert.doesNotMatch(detected, /MariaDB/i);
+  t.diagnostic(`Verified MySQL server ${detected}`);
 
   const [[{ tables }]] = await db.query(`SELECT COUNT(*) AS tables FROM information_schema.tables WHERE table_schema = DATABASE()`);
   assert.equal(tables, 0, 'Start with a new empty disposable fixture database');
@@ -44,8 +57,20 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
       ('Deleted', 10, 2, UTC_TIMESTAMP()), ('Reassigned', 10, 2, NULL), ('OtherPilot', 30, 2, NULL),
       ('Changing', 10, 2, NULL);
   `);
+  for (const file of ['001_cgas_tour.sql', '002_cgas_historical_announcements.sql', '003_cgas_phpvms_awards.sql']) {
+    await db.query(await sql('migrations/' + file));
+  }
+  await db.query(await sql('integrations/phpvms7/bridge-nonces.sql'));
   await assert.rejects(training.progress(db, '10'), { code: 'ER_NO_SUCH_TABLE' });
-  const migration = await readFile(path.join(__dirname, '../migrations/004_training_records.sql'), 'utf8');
+  if (mysql57) {
+    await assert.rejects(requireTrainingIntegrity(db), /verified MySQL 5.7.44 migration path/);
+    for (const file of ['005_training_pirep_link.sql', '006_training_qualifications.sql']) {
+      await assert.rejects(db.query(await phaseSql(file)), /VUSCG_STOP_WRONG_VERSION/);
+    }
+  } else {
+    await assert.rejects(db.query(await sql('migrations/mysql57/004_training_records.sql')), /VUSCG_STOP_WRONG_VERSION/);
+  }
+  const migration = await phaseSql('004_training_records.sql');
   await db.query(migration);
   await db.query(migration);
   const input = {
@@ -77,6 +102,7 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
     ]);
   });
 
+  const integrityError = error => ['ER_NO_REFERENCED_ROW_2', 'ER_CHECK_CONSTRAINT_VIOLATED'].includes(error.code);
   let passedId;
   await t.test('serializes duplicate clicks and identical attempts but keeps different attempts', async () => {
     const identical = makeRecord(1);
@@ -170,7 +196,9 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
 
   await t.test('005 preserves standalone and imported history and rejects invalid evidence', async () => {
     const [[{ count }]] = await db.query('SELECT COUNT(*) AS count FROM vuscg_training_records');
-    await db.query(await readFile(path.join(__dirname, '../migrations/005_training_pirep_link.sql'), 'utf8'));
+    const linkedMigration = await phaseSql('005_training_pirep_link.sql');
+    await db.query(linkedMigration);
+    await assert.rejects(db.query(linkedMigration), { code: 'ER_DUP_FIELDNAME' });
     const [[{ retained }]] = await db.query("SELECT COUNT(*) AS retained FROM vuscg_training_records WHERE source IN ('manual', 'import')");
     assert.equal(retained, count);
     assert.ok((await training.history(db, pilot.id, 10, 0)).some(row => row.source === 'import'));
@@ -183,6 +211,40 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
     }
     const preview = await training.previewEvaluation(db, null, { ...input, programId: 'fw', pirepId: 'AbC-3250' });
     assert.equal(preview.pilot.id, '10');
+  });
+
+  await t.test('record and void audit constraints reject invalid SQL writes without changing history', async () => {
+    const [[record]] = await db.execute("SELECT record_id, comments FROM vuscg_training_records WHERE source='manual' AND voided_at IS NULL LIMIT 1");
+    for (const update of [
+      'instructor_discord_id=NULL',
+      "source='import'",
+      "source='pirep', pirep_id=NULL",
+      "source='pirep', pirep_id='AbC-3250', instructor_discord_id=NULL",
+      'voided_at=UTC_TIMESTAMP(6)',
+      "void_interaction_id='990000000000000001'",
+    ]) {
+      await assert.rejects(db.execute(`UPDATE vuscg_training_records SET ${update} WHERE record_id=?`, [record.record_id]), integrityError);
+    }
+    assert.deepEqual(await training.getRecord(db, record.record_id).then(row => row.voided_at), null);
+    await assert.rejects(training.transaction(db, async connection => {
+      await connection.execute("UPDATE vuscg_training_records SET comments='Fixture rollback' WHERE record_id=?", [record.record_id]);
+      await connection.execute('UPDATE vuscg_training_records SET voided_at=UTC_TIMESTAMP(6) WHERE record_id=?', [record.record_id]);
+    }), integrityError);
+    assert.deepEqual(await training.first(db, 'SELECT comments FROM vuscg_training_records WHERE record_id=?', [record.record_id]),
+      { comments: record.comments });
+    if (mysql57) {
+      await assert.rejects(db.execute('INSERT INTO vuscg_training_integrity_guard (id) VALUES (2)'), { code: 'ER_DUP_ENTRY' });
+      const connection = await db.getConnection();
+      try {
+        await connection.query('SET SESSION foreign_key_checks=0');
+        await assert.rejects(requireTrainingIntegrity(connection), /foreign keys/);
+        await connection.query('SET SESSION foreign_key_checks=1');
+        await connection.query("SET SESSION sql_mode=''");
+        await assert.rejects(requireTrainingIntegrity(connection), /strict SQL mode/);
+      } finally {
+        connection.destroy();
+      }
+    }
   });
 
   let linkedPass;
@@ -204,6 +266,12 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
     assert.equal(firstPasses.filter(row => row.status === 'fulfilled').length, 1);
     linkedPass = firstPasses.find(row => row.status === 'fulfilled').value.recordId;
     await training.createRecord(db, linked(5, { lessonId: 'flight-6', outcome: 'passed' }));
+    await assert.rejects(db.execute(`INSERT INTO vuscg_training_records
+      (record_id, user_id, public_pilot_id, program_id, lesson_id, outcome, training_date, created_at,
+       instructor_discord_id, instructor_pilot_id, comments, source, source_key, payload_hash, attempt_hash, pirep_id)
+      SELECT UUID(), user_id, public_pilot_id, program_id, lesson_id, outcome, training_date, created_at,
+        instructor_discord_id, instructor_pilot_id, comments, source, UUID(), payload_hash, attempt_hash, pirep_id
+      FROM vuscg_training_records WHERE record_id=?`, [linkedPass]), { code: 'ER_DUP_ENTRY' });
     const fw = (await training.progress(db, pilot.id)).find(track => track.id === 'fw');
     assert.ok(fw.completed.some(item => item.id === 'flight-5'));
     assert.ok(fw.completed.some(item => item.id === 'flight-6'));
@@ -277,11 +345,22 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
 
 
   await t.test('006 preserves training rows and audits authorized qualification changes and delivery jobs', async () => {
-    const migration = await readFile(path.join(__dirname, '../migrations/006_training_qualifications.sql'), 'utf8');
+    const migration = await phaseSql('006_training_qualifications.sql');
+    if (mysql57) await assert.rejects(requireTrainingIntegrity(db, { qualifications: true }), /verified MySQL 5.7.44/);
     const [[before]] = await db.query('SELECT COUNT(*) AS total FROM vuscg_training_records');
     await db.query(migration);
     await db.query(migration);
     assert.deepEqual((await db.query('SELECT COUNT(*) AS total FROM vuscg_training_records'))[0][0], before);
+    const eventInsert = `INSERT INTO vuscg_training_qualification_events
+      (event_id, user_id, public_pilot_id, qualification_id, program_id, action, effective_date,
+       reviewer_user_id, reviewer_pilot_id, reviewer_discord_id, reviewer_role, reason, created_at, interaction_id)
+      VALUES (UUID(), 10, 3250, ?, '', ?, '2025-11-05', 30, 11, ?, ?, ?, UTC_TIMESTAMP(6), ?)`;
+    await assert.rejects(db.execute(eventInsert, ['ip', 'grant', actor.discordId, 'instructor_pilot', '', actor.discordId]), integrityError);
+    for (const qualification of ['mr', 'dlq', 'hitron', 'blackjack', 'mq9', 'ip']) {
+      await assert.rejects(db.execute(eventInsert, [qualification, 'revoke', actor.discordId, 'instructor_pilot', 'Reason', actor.discordId]), integrityError);
+    }
+    await assert.rejects(db.execute(eventInsert, ['ip', 'revoke', actor.discordId, 'command_staff', '  ', actor.discordId]), integrityError);
+    assert.equal((await db.query('SELECT COUNT(*) AS total FROM vuscg_training_qualification_events'))[0][0].total, 0);
     await db.query(`
       ALTER TABLE users ADD rank_id INT NOT NULL DEFAULT 12;
       CREATE TABLE ranks (id INT PRIMARY KEY, name VARCHAR(80));
@@ -437,25 +516,48 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
 
   await t.test('007 preserves manual native pivots and supports precise owned-row removal', async () => {
     await db.query(`
-      CREATE TABLE user_awards (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, award_id INT);
-      CREATE TABLE role_user (user_id INT, role_id INT, user_type VARCHAR(80), PRIMARY KEY (user_id, role_id, user_type));
-      CREATE TABLE typerating_user (user_id INT, typerating_id INT, PRIMARY KEY (user_id, typerating_id));
-      INSERT INTO user_awards (user_id, award_id) VALUES (10, 8);
-      INSERT INTO role_user VALUES (10, 20, 'user');
-      INSERT INTO typerating_user VALUES (10, 100), (10, 200);
+      CREATE TABLE user_awards (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, user_id INT UNSIGNED NOT NULL, award_id INT UNSIGNED NOT NULL,
+        KEY ix_user_awards_pilot_award (user_id, award_id)
+      ) ENGINE=InnoDB;
+      CREATE TABLE role_user (
+        role_id INT UNSIGNED NOT NULL, user_id INT UNSIGNED NOT NULL, user_type VARCHAR(191) NOT NULL,
+        PRIMARY KEY (role_id, user_id, user_type)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      CREATE TABLE typerating_user (
+        typerating_id INT UNSIGNED NOT NULL, user_id INT UNSIGNED NOT NULL, PRIMARY KEY (typerating_id, user_id)
+      ) ENGINE=InnoDB;
     `);
-    await db.query(await readFile(path.join(__dirname, '../migrations/007_training_native_ownership.sql'), 'utf8'));
+    const userType = 'App\\Models\\User';
+    await db.execute('INSERT INTO role_user (user_id, role_id, user_type) VALUES (10, 2, ?)', [userType]);
+    await db.execute('INSERT INTO user_awards (user_id, award_id) VALUES (10, 8), (30, 7)');
+    await db.execute('INSERT INTO typerating_user (user_id, typerating_id) VALUES (10, 1), (10, 3)');
+    await db.query(await sql('migrations/007_training_native_ownership.sql'));
+
     const owned = 'b'.repeat(64);
-    await db.execute('INSERT INTO user_awards (user_id, award_id, vuscg_qualification_owner) VALUES (?, ?, ?)', [10, 8, owned]);
-    await assert.rejects(db.execute('INSERT INTO user_awards (user_id, award_id, vuscg_qualification_owner) VALUES (?, ?, ?)',
-      [10, 8, owned]), { code: 'ER_DUP_ENTRY' });
-    await db.execute('DELETE FROM user_awards WHERE user_id=? AND award_id=? AND vuscg_qualification_owner=?', [10, 8, owned]);
-    const [[manual]] = await db.execute('SELECT vuscg_qualification_owner FROM user_awards WHERE user_id=10 AND award_id=8');
-    assert.equal(manual.vuscg_qualification_owner, null);
-    const [[role]] = await db.execute('SELECT vuscg_qualification_owner FROM role_user WHERE user_id=10 AND role_id=20');
-    assert.equal(role.vuscg_qualification_owner, null);
-    const [ratings] = await db.execute('SELECT typerating_id FROM typerating_user WHERE user_id=10 ORDER BY typerating_id');
-    assert.deepEqual(ratings.map(item => item.typerating_id), [100, 200]);
+    // Preserve the installed award table's nonunique pair and prevent duplicate integration markers.
+    await db.execute('INSERT INTO user_awards (user_id, award_id, vuscg_qualification_owner) VALUES (10, 8, ?)', [owned]);
+    await assert.rejects(db.execute('INSERT INTO user_awards (user_id, award_id, vuscg_qualification_owner) VALUES (10, 8, ?)',
+      [owned]), { code: 'ER_DUP_ENTRY' });
+    await assert.rejects(db.execute('INSERT INTO role_user (user_id, role_id, user_type, vuscg_qualification_owner) VALUES (10, 2, ?, ?)',
+      [userType, owned]), { code: 'ER_DUP_ENTRY' });
+    await assert.rejects(db.execute('INSERT INTO typerating_user (user_id, typerating_id, vuscg_qualification_owner) VALUES (10, 1, ?)',
+      [owned]), { code: 'ER_DUP_ENTRY' });
+    await db.execute('INSERT INTO role_user (user_id, role_id, user_type, vuscg_qualification_owner) VALUES (30, 2, ?, ?)', [userType, owned]);
+    await db.execute('INSERT INTO typerating_user (user_id, typerating_id, vuscg_qualification_owner) VALUES (10, 9, ?)', [owned]);
+
+    await db.execute('DELETE FROM user_awards WHERE user_id=10 AND award_id=8 AND vuscg_qualification_owner=?', [owned]);
+    await db.execute('DELETE FROM role_user WHERE user_id=30 AND role_id=2 AND user_type=? AND vuscg_qualification_owner=?', [userType, owned]);
+    await db.execute('DELETE FROM typerating_user WHERE user_id=10 AND typerating_id=9 AND vuscg_qualification_owner=?', [owned]);
+
+    const [awards] = await db.query('SELECT user_id, award_id, vuscg_qualification_owner FROM user_awards ORDER BY user_id');
+    assert.deepEqual(awards, [{ user_id: 10, award_id: 8, vuscg_qualification_owner: null },
+      { user_id: 30, award_id: 7, vuscg_qualification_owner: null }]);
+    const [roles] = await db.query('SELECT user_id, role_id, user_type, vuscg_qualification_owner FROM role_user');
+    assert.deepEqual(roles, [{ user_id: 10, role_id: 2, user_type: userType, vuscg_qualification_owner: null }]);
+    const [ratings] = await db.query('SELECT typerating_id, vuscg_qualification_owner FROM typerating_user WHERE user_id=10 ORDER BY typerating_id');
+    assert.deepEqual(ratings, [{ typerating_id: 1, vuscg_qualification_owner: null },
+      { typerating_id: 3, vuscg_qualification_owner: null }]);
   });
 
 
@@ -526,19 +628,68 @@ test('Training against disposable MySQL 8.4', { skip: !port && 'Set TRAINING_TES
   });
 
 
+  await t.test('P01 watcher selects pending reports and nonce reservations reject replay', async subtest => {
+    await db.query(`
+      CREATE TABLE aircraft (id INT UNSIGNED PRIMARY KEY, registration VARCHAR(12), icao VARCHAR(8), status CHAR(1));
+      CREATE TABLE user_field_values (user_id INT UNSIGNED, user_field_id INT, value VARCHAR(32));
+      ALTER TABLE pireps ADD aircraft_id INT UNSIGNED, ADD dpt_airport_id VARCHAR(4), ADD arr_airport_id VARCHAR(4),
+        ADD flight_time INT, ADD distance INT, ADD source_name VARCHAR(32), ADD submitted_at DATETIME;
+      INSERT INTO aircraft VALUES (1, 'N42CG', 'H60', 'A');
+      UPDATE pireps SET aircraft_id=1, dpt_airport_id='KAST', arr_airport_id='KACV', flight_time=40,
+        distance=100, source_name='Fixture', submitted_at=UTC_TIMESTAMP() WHERE id='Pending';
+    `);
+    let cache = '{}';
+    subtest.mock.method(fs, 'readFileSync', path => {
+      assert.equal(path, './pending_pireps_cache.json');
+      return cache;
+    });
+    subtest.mock.method(fs, 'writeFileSync', (path, contents) => {
+      assert.equal(path, './pending_pireps_cache.json.tmp');
+      cache = contents;
+    });
+    subtest.mock.method(fs, 'renameSync', () => {});
+    const reports = [];
+    const thread = {
+      id: 'thread', parentId: 'training', type: ChannelType.PrivateThread, name: 'Training Case for C3250',
+      members: { fetch: async ({ member }) => member === '100000000000000325' },
+      send: async payload => {
+        reports.push(payload.embeds[0].toJSON().footer.text);
+        return { id: 'message', channelId: 'thread' };
+      },
+    };
+    const guild = { channels: { fetch: async () => ({
+      id: 'training', threads: {
+        fetchActive: async () => ({ threads: new Collection([[thread.id, thread]]) }),
+        fetchArchived: async () => ({ threads: new Collection(), hasMore: false }),
+      },
+    }) } };
+    const opts = { db, client: { guilds: { fetch: async () => guild } }, guildId: 'fixture', trainingChannelId: 'training',
+      pirepBaseUrl: 'https://example.test/pireps' };
+    await tickWatcher(opts);
+    await tickWatcher({ ...opts, client: { ...opts.client, channels: { fetch: async () => assert.fail('Pending cache must not be edited') } } });
+    assert.deepEqual(reports, ['PIREP: Pending']);
+
+    const [firstNonce] = await db.execute(
+      'INSERT IGNORE INTO vuscg_pirep_review_nonces (nonce, expires_at) VALUES (?, UNIX_TIMESTAMP() + 60)', ['a'.repeat(32)],
+    );
+    const [replayedNonce] = await db.execute(
+      'INSERT IGNORE INTO vuscg_pirep_review_nonces (nonce, expires_at) VALUES (?, UNIX_TIMESTAMP() + 60)', ['a'.repeat(32)],
+    );
+    assert.equal(firstNonce.affectedRows, 1);
+    assert.equal(replayedNonce.affectedRows, 0);
+  });
+
   await t.test('reviewed migration order preserves CGAS state and read-only schema inventory executes', async () => {
-    const sql = relative => readFile(path.join(__dirname, '..', relative), 'utf8');
-    for (const file of ['001_cgas_tour.sql', '002_cgas_historical_announcements.sql', '003_cgas_phpvms_awards.sql']) {
-      await db.query(await sql('migrations/' + file));
-    }
-    await db.query(await sql('integrations/phpvms7/bridge-nonces.sql'));
     await db.query(await sql('integrations/phpvms7/bridge-nonces.sql'));
     const [inventory] = await db.query(await sql('integrations/phpvms7/training-schema-preflight.sql'));
     assert.equal(inventory[1][0].selected_schema, 'vuscg_training_test');
+    assert.equal(inventory[1][0].training_migration_path, mysql57 ? 'migrations/mysql57' : 'migrations');
     assert.ok(inventory[2].some(row => row.TABLE_NAME === 'bot_cgas_completions'));
     assert.ok(inventory[3].some(row => row.TABLE_NAME === 'bot_cgas_completions' && row.COLUMN_NAME === 'award_status'));
     assert.ok(inventory[3].some(row => row.TABLE_NAME === 'user_awards' && row.COLUMN_NAME === 'vuscg_qualification_owner'));
-    assert.ok(inventory[5].some(row => row.CONSTRAINT_NAME === 'chk_training_qual_actor' && row.ENFORCED === 'YES'));
+    assert.ok(inventory[5].some(row => mysql57
+      ? row.CONSTRAINT_NAME === 'fk_training_actor_guard' && row.CONSTRAINT_TYPE === 'FOREIGN KEY'
+      : row.CONSTRAINT_NAME === 'chk_training_qual_actor' && row.ENFORCED === 'YES'));
     const [[count]] = await db.query('SELECT COUNT(*) AS count FROM bot_cgas_completions');
     assert.equal(count.count, 0);
   });

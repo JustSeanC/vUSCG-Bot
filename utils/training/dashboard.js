@@ -18,21 +18,8 @@ function dateRange(start, end, today = new Date()) {
   return [since, last];
 }
 
-const metrics = `WITH latest AS (
-  SELECT r.user_id, r.program_id, r.instructor_pilot_id, r.source, r.training_date,
-    ROW_NUMBER() OVER (PARTITION BY r.user_id, r.program_id ORDER BY r.training_date DESC, r.created_at DESC, r.record_id DESC) AS position
-  FROM vuscg_training_records r WHERE r.voided_at IS NULL
-), status AS (
-  SELECT e.user_id, e.program_id, e.active AND p.enabled AS active, u.pilot_id, u.name,
-    COUNT(l.lesson_id) AS configured,
-    SUM(EXISTS (SELECT 1 FROM vuscg_training_records r
-      WHERE r.user_id = e.user_id AND r.program_id = e.program_id
-        AND r.lesson_id = l.lesson_id AND r.outcome = 'passed' AND r.voided_at IS NULL)) AS completed
-  FROM vuscg_training_enrollments e JOIN vuscg_training_programs p USING (program_id)
-  JOIN users u ON u.id = e.user_id
-  LEFT JOIN vuscg_training_lessons l ON l.program_id = e.program_id AND l.active = TRUE
-  GROUP BY e.user_id, e.program_id, e.active, p.enabled, u.pilot_id, u.name
-), metrics AS (
+// A correlated latest-row lookup avoids MySQL 8-only CTEs and window functions.
+const metrics = `(
   SELECT s.*, l.instructor_pilot_id, l.source, l.training_date,
     CASE WHEN NOT s.active THEN 'paused' WHEN l.training_date IS NULL THEN 'no_record'
       WHEN DATEDIFF(UTC_DATE(), l.training_date) >= ? THEN 'follow_up' ELSE 'recent' END AS followup,
@@ -41,36 +28,53 @@ const metrics = `WITH latest AS (
       WHERE q.user_id = s.user_id AND q.qualification_id = 'mr' AND q.active = TRUE
         AND q.program_id IN ('', s.program_id)
     ) AS slots_without_mr
-  FROM status s LEFT JOIN latest l ON l.user_id = s.user_id AND l.program_id = s.program_id AND l.position = 1
+  FROM (
+    SELECT e.user_id, e.program_id, e.active AND p.enabled AS active, u.pilot_id, u.name,
+      COUNT(l.lesson_id) AS configured,
+      SUM(EXISTS (SELECT 1 FROM vuscg_training_records r
+        WHERE r.user_id = e.user_id AND r.program_id = e.program_id
+          AND r.lesson_id = l.lesson_id AND r.outcome = 'passed' AND r.voided_at IS NULL)) AS completed
+    FROM vuscg_training_enrollments e JOIN vuscg_training_programs p USING (program_id)
+    JOIN users u ON u.id = e.user_id
+    LEFT JOIN vuscg_training_lessons l ON l.program_id = e.program_id AND l.active = TRUE
+    GROUP BY e.user_id, e.program_id, e.active, p.enabled, u.pilot_id, u.name
+  ) AS s LEFT JOIN vuscg_training_records l ON l.record_id = (
+    SELECT r.record_id FROM vuscg_training_records r
+    WHERE r.user_id = s.user_id AND r.program_id = s.program_id AND r.voided_at IS NULL
+    ORDER BY r.training_date DESC, r.created_at DESC, r.record_id DESC LIMIT 1
+  )
 )`;
 
 async function roster(db, { program = null, status = 'all', days, limit, offset }) {
   const track = program == null ? null : code(program, 'program');
   if (!['all', 'active', 'paused'].includes(status)) throw new TrainingError('Select a valid enrollment status.');
   const active = status === 'all' ? null : Number(status === 'active');
-  const [rows] = await db.query(`${metrics}
-    SELECT m.*, DATE_FORMAT(m.training_date, '%Y-%m-%d') AS latest_date,
+  const [rows] = await db.query(`SELECT m.*, DATE_FORMAT(m.training_date, '%Y-%m-%d') AS latest_date,
       (SELECT GROUP_CONCAT(e.program_id ORDER BY e.program_id SEPARATOR ', ') FROM vuscg_training_enrollments e
         JOIN vuscg_training_programs p USING (program_id)
         WHERE e.user_id = m.user_id AND e.active AND p.enabled) AS active_programs,
       (SELECT JSON_ARRAYAGG(JSON_OBJECT('name', q.name, 'program_id', qs.program_id))
         FROM vuscg_training_qualification_status qs JOIN vuscg_training_qualifications q USING (qualification_id)
         WHERE qs.user_id = m.user_id AND qs.active) AS awards
-    FROM metrics m WHERE (? IS NULL OR m.program_id = ?) AND (? IS NULL OR m.active = ?)
+    FROM ${metrics} AS m WHERE (? IS NULL OR m.program_id = ?) AND (? IS NULL OR m.active = ?)
     ORDER BY m.pilot_id, m.user_id, m.program_id LIMIT ? OFFSET ?`, [days, track, track, active, active, limit, offset]);
   return rows;
 }
 
 async function stats(db, [start, end], days) {
   const [enrollment, attempts, awardCounts, recent] = await Promise.all([
-    first(db, `${metrics}
-      SELECT COUNT(DISTINCT user_id) AS pilots, COUNT(*) AS enrollments,
+    first(db, `SELECT COUNT(DISTINCT user_id) AS pilots, COUNT(*) AS enrollments,
         SUM(active AND program_id = 'rw') AS rw, SUM(active AND program_id = 'fw') AS fw,
-        (SELECT COUNT(*) FROM (SELECT user_id FROM metrics WHERE active GROUP BY user_id HAVING COUNT(*) > 1) AS multi) AS multi,
+        (SELECT COUNT(*) FROM (
+          SELECT e.user_id FROM vuscg_training_enrollments e
+          JOIN vuscg_training_programs p USING (program_id)
+          JOIN users u ON u.id = e.user_id
+          WHERE e.active AND p.enabled GROUP BY e.user_id HAVING COUNT(*) > 1
+        ) AS multi) AS multi,
         SUM(completed) AS completed, SUM(followup = 'no_record') AS no_record,
         SUM(followup = 'follow_up') AS follow_up, SUM(followup = 'recent') AS recent,
         SUM(followup = 'paused') AS paused, SUM(active AND slots_without_mr) AS slots_without_mr
-      FROM metrics`, [days]),
+      FROM ${metrics} AS m`, [days]),
     first(db, `SELECT COUNT(*) AS attempts, SUM(outcome = 'passed') AS passed, SUM(outcome = 'needs_training') AS needs_training,
       SUM(outcome = 'in_progress') AS in_progress, SUM(source = 'import') AS imported, COUNT(DISTINCT user_id) AS trained
       FROM vuscg_training_records WHERE training_date BETWEEN ? AND ? AND voided_at IS NULL`, [start, end]),

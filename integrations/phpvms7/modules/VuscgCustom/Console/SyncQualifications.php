@@ -9,6 +9,7 @@ use App\Models\UserAward;
 use DomainException;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Modules\VuscgCustom\Services\QualificationNativePlan as Plan;
 use Modules\VuscgCustom\Services\TraineeRatingPlan;
@@ -32,6 +33,10 @@ final class SyncQualifications extends Command
         $eventId = $this->option('event');
         if ($eventId !== null && !preg_match('/\A[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\z/', $eventId)) {
             $this->error('Use a qualification event UUID.');
+            return self::FAILURE;
+        }
+        if (!$this->hasTrainingIntegrity()) {
+            $this->error('Native training synchronization requires the verified MySQL 5.7.44 schema, foreign keys, and strict SQL mode.');
             return self::FAILURE;
         }
         $jobs = !$qualifications ? [] : DB::table('vuscg_training_qualification_sync')->whereIn('state', ['pending', 'retry'])
@@ -116,6 +121,47 @@ final class SyncQualifications extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    private function hasTrainingIntegrity(): bool
+    {
+        $session = DB::connection()->selectOne(
+            "SELECT VERSION() AS version, @@SESSION.foreign_key_checks AS fk_checks,
+                FIND_IN_SET('STRICT_TRANS_TABLES', @@SESSION.sql_mode) OR
+                FIND_IN_SET('STRICT_ALL_TABLES', @@SESSION.sql_mode) AS strict_mode", [], false
+        );
+        if (strpos($session->version, '5.7.') !== 0) {
+            return true;
+        }
+        if (preg_match('/^5[.]7[.]44(?:-|$)/', $session->version) !== 1 ||
+            !(bool) $session->fk_checks || !(bool) $session->strict_mode) {
+            return false;
+        }
+        try {
+            return $this->hasGuards('SHOW CREATE TABLE vuscg_training_records', [
+                'fk_training_source_guard' => 'source_guard', 'fk_training_void_guard' => 'void_audit_guard',
+            ]) && $this->hasGuards('SHOW CREATE TABLE vuscg_training_qualification_events', [
+                'fk_training_actor_guard' => 'actor_guard', 'fk_training_revoke_guard' => 'revoke_reason_guard',
+            ]);
+        } catch (QueryException $error) {
+            if ((int) ($error->errorInfo[1] ?? 0) !== 1146) {
+                throw $error;
+            }
+            return false;
+        }
+    }
+
+    private function hasGuards(string $statement, array $guards): bool
+    {
+        $row = DB::connection()->selectOne($statement, [], false);
+        $definition = str_replace('`', '', $row->{'Create Table'});
+        foreach ($guards as $name => $column) {
+            if (!str_contains($definition,
+                "CONSTRAINT $name FOREIGN KEY ($column) REFERENCES vuscg_training_integrity_guard (allowed)")) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private function queue(object $job)

@@ -2,6 +2,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const { validPirepId } = require('../pirepBridge');
 const { readReport, reportState, PIREP_STATE } = require('../pirepEvidence');
 const { resolvePilot } = require('../pilotStats');
+const { requireTrainingIntegrity } = require('./schema');
 const { TrainingError, pilotNumber, code, snowflake, recordId, text, evaluation } = require('./validation');
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -11,9 +12,10 @@ async function first(db, sql, params) {
   return rows[0];
 }
 
-async function transaction(db, run) {
+async function transaction(db, run, options) {
   const connection = await db.getConnection();
   try {
+    await requireTrainingIntegrity(connection, options);
     await connection.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
     await connection.beginTransaction();
     const result = await run(connection);
@@ -52,7 +54,7 @@ async function linkedDiscordForPilot(db, pilotId) {
 
 async function getProgram(db, programId, lock = false) {
   const program = await first(db, `SELECT program_id, name FROM vuscg_training_programs
-    WHERE program_id = ? AND enabled = TRUE${lock ? ' FOR SHARE' : ''}`, [code(programId, 'program')]);
+    WHERE program_id = ? AND enabled = TRUE${lock ? ' LOCK IN SHARE MODE' : ''}`, [code(programId, 'program')]);
   if (!program) throw new TrainingError('That training program is unavailable.');
   return program;
 }
@@ -60,7 +62,7 @@ async function getProgram(db, programId, lock = false) {
 async function getLesson(db, programId, lessonId, lock = false) {
   const lesson = await first(db, `SELECT l.name, p.name AS program_name FROM vuscg_training_lessons l
     JOIN vuscg_training_programs p USING (program_id)
-    WHERE l.program_id = ? AND l.lesson_id = ? AND l.active = TRUE AND p.enabled = TRUE${lock ? ' FOR SHARE' : ''}`, [programId, lessonId]);
+    WHERE l.program_id = ? AND l.lesson_id = ? AND l.active = TRUE AND p.enabled = TRUE${lock ? ' LOCK IN SHARE MODE' : ''}`, [programId, lessonId]);
   if (!lesson) throw new TrainingError('That lesson is unavailable in the selected training program.');
   return lesson;
 }

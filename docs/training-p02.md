@@ -6,7 +6,7 @@ P02 stores instructor evaluations independently of PIREPs. Pilots can be enrolle
 
 ## Deploy to a test installation
 
-1. Use a staging phpVMS database and Discord guild. Confirm the staging phpVMS `users.id`, `users.pilot_id`, and `discord_links` mapping. The database account needs to read those tables and read/write the four training tables. Use a migration account for schema changes. Run [004_training_records.sql](../migrations/004_training_records.sql) against the same database the bot uses. It uses InnoDB and is tested on MySQL 8.4. Verify compatibility and take a backup before running it on another installation. The seed statements preserve existing program and lesson settings on rerun.
+1. Use a staging phpVMS database and Discord guild. Confirm the staging phpVMS `users.id`, `users.pilot_id`, and `discord_links` mapping. The database account needs to read those tables and read/write the four training tables. Use a migration account for schema changes. Run the database-version-specific 004 file from the [P07 staging procedure](training-p07-phpmyadmin-installation.md) against the authorized staging database the bot uses. Both supported InnoDB paths require a verified backup. The seed statements preserve existing program and lesson settings on rerun.
 2. Deploy the P02 bot code, including `commands/training.js` and `utils/training/`, and install from the existing npm lockfile. Reuse `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `GUILD_ID`, `CLIENT_ID`, `DISCORD_TOKEN`, `COMMAND_STAFF_ROLE_ID`, and `INSTRUCTOR_PILOT_ROLE_ID`. Set `TRAINING_CHANNEL_ID` to the parent of the existing private trainee threads if it differs from the bot’s built-in vUSCG training channel. Configure the staging value explicitly.
 3. From the bot checkout run `node deploy-commands.js` for the intended guild, then start the staged bot with `node index.js`. Command registration replaces that guild's bot command list with the definitions in the repository. Check that all existing commands and the six `/training` subcommands are present. The bot needs the Members intent to recheck roles at confirmation and verify thread membership for notifications.
 4. Verify an ordinary pilot can see only their own progress and history. With test staff accounts, enroll a test pilot in both tracks, save distinct attempts, confirm a void, and check history, effective progress, and thread privacy. Try cancellation, an expired button, and an identical attempt. Approve a live rollout only after staging validation.
@@ -73,7 +73,7 @@ docker run --rm -d --name vuscg-training-fixture \
 docker logs vuscg-training-fixture
 docker port vuscg-training-fixture 3306
 # After MySQL is ready, use the loopback port printed above.
-TRAINING_TEST_MYSQL_PORT=<port> npm test
+TRAINING_TEST_MYSQL_PORT=<port> TRAINING_TEST_MYSQL_VERSION=8.4 npm test
 docker stop vuscg-training-fixture
 ```
 

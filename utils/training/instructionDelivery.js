@@ -1,3 +1,4 @@
+const { requireTrainingIntegrity } = require('./schema');
 const { createHash } = require('node:crypto');
 const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { first, findPilot, linkedDiscordForPilot } = require('./service');
@@ -87,6 +88,7 @@ async function tryInstructionDelivery(db, guild, id, retryActor = null) {
   const name = `p06:discord:${id}`;
   let reusable = false;
   try {
+    await requireTrainingIntegrity(connection);
     if (!(await first(connection, 'SELECT GET_LOCK(?,0) AS acquired', [name])).acquired) {
       reusable = true;
       return { state: 'pending', result: 'delivery_busy' };

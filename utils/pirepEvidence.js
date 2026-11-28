@@ -18,7 +18,7 @@ async function readReport(db, id, { lock = false } = {}) {
   if (!validPirepId(id)) return null;
   const [rows] = await db.execute(`SELECT p.id, p.state, p.deleted_at, CAST(u.id AS CHAR) AS user_id,
     u.pilot_id, u.name FROM pireps p LEFT JOIN users u ON u.id = p.user_id
-    WHERE p.id = ?${lock ? ' FOR SHARE' : ''}`, [id]);
+    WHERE p.id = ?${lock ? ' LOCK IN SHARE MODE' : ''}`, [id]);
   const report = rows[0];
   return report?.id === id ? report : null;
 }

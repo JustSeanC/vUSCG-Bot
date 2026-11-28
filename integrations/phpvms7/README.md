@@ -1,5 +1,7 @@
 # P01 native phpVMS PIREP review
 
+Select the version-specific training schema on authorized staging before testing the bridge or native workers. The supplied type-rating code column is `typeratings.type`. Verify it with the installed models, along with native awards, permissions and role/cache handling. [P07 compatibility](../../docs/training-p07-mysql57-compatibility.md) · [phpMyAdmin procedure](../../docs/training-p07-phpmyadmin-installation.md)
+
 The Discord bot sends a signed decision to the existing VuscgCustom module. The module permits pending reports to move to accepted or rejected through `PirepService::changeState()`. Pending polling, trainee threads and message reconciliation continue using database reads. Discord buttons fail closed when the bridge is unavailable. The production bot and phpVMS installation can be upgraded separately.
 
 ## Cutover gate
