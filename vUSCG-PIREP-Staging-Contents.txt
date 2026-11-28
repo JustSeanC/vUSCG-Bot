@@ -1,0 +1,3236 @@
+===== docs/pirep-concurrency-handoff.md =====
+# PIREP concurrency repair and staging handoff
+
+**Production remains blocked.** This candidate was built against the two supplied partial site audits, at the bot baseline `201ef10f38975d1efffdba4fd54c9eb8fa3b7c60`. The live site, database, bot, secrets, configuration and Discord commands were left untouched. The earlier concurrency draft was reviewed as a reference. The installation patch is local and intended for an isolated copy of the installed Laravel application.
+
+## Exact files and installation order
+
+1. Use an authorized staging copy with a separate MySQL database, website, test guild and mail/Discord/webhook/queue sinks. Pause review, filing and other writers on that copy. Export the staged schema and data, record the current application and worker builds, and prove the backup can be restored to another disposable schema. Confirm MySQL 5.7.44, InnoDB, the selected schema, the primary connection and enabled foreign-key checks. Follow the P07 session instructions if phpMyAdmin or the server defaults to an empty SQL mode. [P07 session instructions](training-p07-phpmyadmin-installation.md)
+2. From the **staged phpVMS root**, use the source hashes and `git apply --check /path/to/installed-source.patch`. If a file differs from the supplied installed snapshot, review and merge the diff before proceeding. The included DDL adds two columns to `pireps`. Apply it once on staging, with writers drained. Review metadata lock time, record the exact command, and verify both columns with `SHOW CREATE TABLE pireps` before installing PHP. [Baseline hashes](../integrations/phpvms7/pirep-concurrency/installed-source.sha256) · [Staging schema](../integrations/phpvms7/pirep-concurrency/schema.sql)
+3. Apply the checked source patch in the staged tree. With no Git repository at the web root, apply it to an isolated local copy of the site source and upload only the changed files to **staging**, preserving existing permissions. The candidate hashes apply to the exact supplied baseline. [Source patch](../integrations/phpvms7/pirep-concurrency/installed-source.patch) · [Candidate hashes](../integrations/phpvms7/pirep-concurrency/candidate-source.sha256)
+
+   | Site-relative path | Change |
+   | --- | --- |
+   | `app/Services/PirepService.php` | Shared row locks, filing boundary, revision-based review, edit/cancel/delete protection |
+   | `app/Services/UserService.php` | Locked counters and pilot recount |
+   | `app/Services/AircraftService.php` | Locked aircraft recount |
+   | `app/Http/Controllers/Admin/PirepController.php` | Delegate review; protect create, edit and delete; return the revision and conflict state |
+   | `app/Http/Controllers/Api/PirepController.php` | Atomic ACARS filing and submit, locked writes and finance recalculation |
+   | `app/Cron/Hourly/DeletePireps.php` | Recheck eligibility after locking |
+   | `app/Events/PirepFiled.php` | Mark the synchronous locked filing dispatch |
+   | `app/Listeners/DiversionHandler.php` | Use the existing filing lock for diversion |
+   | `app/Notifications/NotificationEventsHandler.php` | Defer reviewed notifications until commit |
+   | `app/Services/PirepAfterCommit.php` | New helper that isolates post-commit delivery failures |
+   | `modules/DisposableBasic/Listeners/Gen_AutoReject.php` | Reject only during synchronous locked filing and write comments on the same connection |
+
+4. Copy the included Blade partial to `resources/views/admin/pireps/vuscg_review_revision.blade.php`. Merge its include into the installed **`admin.pireps.actions` view or theme override** for each PIREP’s action group, including the initial list/detail and the returned AJAX fragment. Give that group `data-vuscg-pirep-review`. Change the installed action JavaScript to include the clicked group’s current field alongside the existing `new_status`, ID and CSRF values:
+
+   ~~~js
+   const review = clickedButton.closest('[data-vuscg-pirep-review]');
+   payload.review_revision = review.querySelector('[name="review_revision"]').value;
+   ~~~
+
+   Replace the action fragment after each response and confirm each submission uses that fragment’s value. On a conflict, display the returned current actions and require a deliberate new click. The controller accepts tokenless pending decisions for compatibility, and reversals require the current revision. The installed view and JavaScript were absent from the handoff, so the theme-specific merge and browser test remain required. [Blade partial](../integrations/phpvms7/pirep-concurrency/admin-review-revision.blade.php)
+5. Copy exactly these two files from `integrations/phpvms7` into the matching VuscgCustom paths on staging. Keep the existing module provider/routes, registration email/webhook files, Laravel `.env`, HMAC configuration and nonce schema. No configuration file is part of this patch. [Bridge controller](../integrations/phpvms7/modules/VuscgCustom/Http/Controllers/Api/PirepReviewController.php) · [Decision gate](../integrations/phpvms7/modules/VuscgCustom/Services/PirepDecisionGate.php)
+
+   - `modules/VuscgCustom/Http/Controllers/Api/PirepReviewController.php`
+   - `modules/VuscgCustom/Services/PirepDecisionGate.php`
+
+   The optional **staging bot** changes are `utils/pirepBridge.js` and `utils/pendingPireps.js`. They recognize a busy review response and send no automatic second decision. PHP and Node test files stay in test workspaces. Leave all P05–P07 flags disabled for installation. Refresh staging caches and restart only isolated staging processes after the files have been verified. [Branch deployment checklist](training-deployment-runbook.md)
+
+## What the source audit established
+
+| Observed path | Candidate behavior and limits |
+| --- | --- |
+| Admin status, legacy direct service calls and Discord | Shared native `PirepService::review()` rereads the row from the primary under `FOR UPDATE`. Same-state and stale revision requests return the current record with zero accounting writes. New terminal transitions rotate the receipt. Discord passes no revision and can only review a submitted pending report. TLS, request/signature validation, clock window and nonce handling are unchanged. |
+| ACARS file, manual submit and auto-reject | The audited API keeps filing attributes, custom fields, fares, route fallback, SimBrief attachment and the synchronous `PirepFiled` event in one transaction. The temporary filing marker distinguishes an unfinished split filing from a previously submitted pending report. DisposableBasic runs before rank auto-approval. A direct rejection by its synchronous listener records one native rejection event, with no acceptance credit. Other callers of `file`, `submit` and `PirepFiled` need inventory. |
+| Divert, bid, leave status and native lifecycle events | The observed subscribers remain synchronous and run under the filing lock. Reviewed broadcasts use an after-commit callback. The actual SimBrief, diversion, fleet/vmsACARS and status-model event implementations need verification. Existing diversion and rejection location policies are retained. Rejecting an accepted report subtracts counts/minutes and reruns native rank policy. It does not automatically rewind position, fuel or a previously awarded credential. |
+| Admin CRUD, ACARS field/route writes and cron | Accounting inputs on accepted records require a rejection before editing or deletion. Admin creation cannot enter ACCEPTED directly. Edits rotate the revision. Cron rechecks age, status, state and revision before deleting. ACARS filing and edits recheck write conditions under the row lock. The audited positional/log endpoints primarily append telemetry and do not set PIREP state. Independently installed telemetry subscribers remain in scope for the staging audit. |
+| Pilot and aircraft recount | Both installed recount services write accounting counters. They lock the affected participant and establish a new consistent read after locking, with no earlier transaction snapshot. Concurrent review uses PIREP → pilot → aircraft. Recount locks only its target participant and uses ordinary aggregate reads of committed PIREPs, avoiding a reverse PIREP row lock. `FlightService`’s inspected ACCEPTED reference is a read. |
+| Finance and awards | Installed subscribers execute synchronously. The candidate retains that order and transaction. The audited explicit API finance recalculation now locks the accepted PIREP. Installed finance service, journal repositories, award plug-ins and their connections/queues were not supplied, so rollback and idempotency of installed ledger and award writes are still unproven. |
+| Emails and broadcast | Defer only the reviewed filed, accepted, rejected, status, state, award, rank and diversion notification sends. Event-time attributes are captured before deferring. Existing registration verification and registration webhook handling are preserved. The callback logs a failed delivery without retrying accounting. It is best-effort across process crashes. A durable delivery outbox and per-channel idempotency policy require actual notification classes, queue configuration and provider capabilities. |
+
+No service automatically reruns a native transaction after a deadlock or lock timeout. The bridge reports busy on a direct MySQL lock conflict. The existing Discord transport reconciles uncertain responses with a newly signed status request. A nested caller must unwind the enclosing transaction if a nested state operation throws. The fixture includes MySQL’s nested lock-timeout exception behavior and outer transaction rollback. Site-defined exception handling is still a staging check.
+
+## Results and evidence
+
+The supplied source archives are partial. The test fixture loads the patched installed PirepService, UserService, AircraftService, FinanceEventHandler, AwardHandler, selected notifications, events and DisposableBasic subscriber. It uses real InnoDB transactions, savepoints and concurrent PHP processes. Its models, ledger/award implementation and external delivery sink are minimal adapters. The final fixture passed on MySQL 5.7.44 and 8.4.13 with PHP 8.1.34 and Illuminate Database 10.48.25. The installed website, its hosting-specific MySQL build and real provider deliveries remain untested.
+
+| Test surface | Evidence |
+| --- | --- |
+| Native-style vs native-style and pending-only bridge calls | A second PHP process opened a competing transaction and blocked on MySQL. Its older REPEATABLE READ snapshot did not overwrite the current state. Each pending outcome applied once. Approve-first and reject-first produced the first transaction’s result. |
+| ACARS and DisposableBasic | A filing transaction held the lock through the synchronous subscriber and accounting. Auto-approval credited once, while an enabled score-rule auto-rejection wrote one reason and no flight credit. Repeating submit produced no second filed or rejected event. |
+| Pilot/aircraft accounting | Fixture acceptance changed pilot minutes **100 → 145**, flights **3 → 4**, aircraft minutes **200 → 245**, rank **1 → 2**, locations **KAAA → KBBB**, and fuel **200 → 150**. Two reports sharing the same pilot and aircraft reached **190 minutes, 5 flights and 290 aircraft minutes**. |
+| Reversal, retry and rollback | An explicit fresh revision permitted accepted → rejected → accepted; an old reversal receipt, stale deletion and repeated decision produced no additional effect. Injected failures after pilot, aircraft, ledger and award writes rolled back the fixture changes and suppressed notifications. An actual lock timeout followed by a new review observed the committed outcome. A post-commit delivery failure did not re-run accounting. |
+| Existing bot and policy suite | The full P07 release script passed on disposable MySQL 5.7.44 and 8.4.13 with 95 Node tests on each and zero skips. PHP 8.1 lint and the standalone gate, qualification, trainee and scoped database checks passed. |
+
+Fixture command from the bot checkout. The supplied PHP image must have PHP 8.1, `pdo_mysql` and `proc_open`. In a disposable Composer project, install `illuminate/database:10.48.25 illuminate/events:10.48.25 illuminate/config:10.48.25` with `composer require`. Use that project’s vendor directory. A disposable PHP image can be built from `php:8.1-cli` with `RUN docker-php-ext-install pdo_mysql`. The runner creates an isolated internal network and a fresh MySQL container for each run.
+
+~~~sh
+bash integrations/phpvms7/tests/pirep-concurrency/run.sh "$PATCHED_SITE_COPY" "$ILLUMINATE_VENDOR" "$PHP_MYSQL_IMAGE" 5.7.44
+bash integrations/phpvms7/tests/pirep-concurrency/run.sh "$PATCHED_SITE_COPY" "$ILLUMINATE_VENDOR" "$PHP_MYSQL_IMAGE" 8.4
+bash scripts/test-training-release.sh
+~~~
+
+## Required staging evidence and release gate
+
+Supply a sanitized **full installed application copy** or an authorized isolated staging checkout and testing access. The two audits already contain the installed API PIREP controller. The following items remain necessary:
+
+- Installed `resources/views/admin/pireps/actions.blade.php` or active theme overrides and every JS caller of the status route. Include `app/Http/Controllers/Frontend/PirepController.php`, ACARS/admin form requests, route definitions, route inventory with middleware, scheduler and queue-worker inventory. Use these to verify ownership, authorization, native filing and all PIREP decision entry points.
+- `app/Contracts/Model.php`, PIREP/User/Aircraft/Rank/Journal/UserAward models and repositories, casts and observers; finance and ledger service/reporting code, SimBrief and bid services, award implementations, migrations and actual `SHOW CREATE TABLE` outputs for every accounting/journal/notification persistence table.
+- All installed module providers, listeners and PIREP writers, including DisposableBasic registration, vmsACARS if installed and VuscgCustom routes and registration handlers. Include `php artisan event:list`, the complete installed `composer.lock`, and database, notification, queue and worker configuration with secrets removed.
+- Isolated test pilot accounts, aircraft and representative PIREPs, sanitized data, staging credentials shared through an approved secret channel, and mail/webhook/Discord sink access. Include the MySQL exact build, engines, primary/replica routing and transaction isolation settings. Supply sanitized settings or establish them directly in staging. Exclude the live `.env`, API keys and webhook tokens.
+
+Run the repository’s `PirepReviewBridgeTest.php` in the staged Laravel test app with disposable fixtures. Then exercise **real routes** with independent authenticated workers and barriers, fresh PIREPs for each race, and logs correlated to those IDs. Verify duplicate admin clicks, native versus signed Discord, both approve/reject orders, actual ACARS and DisposableBasic, concurrent admin edits and cron cleanup, finance recalculation and native reversals. Capture before/after report, pilot, aircraft, journal and award rows and listener dispatch counts. Inject failures at pilot/aircraft/finance/award stages, observe queue processing and mail/Discord sinks after commit, and test replay after an uncertain result. Verify registration email and webhook delivery on staging. These installed-application tests were unrun.
+
+The PHP gate denies production even if its flag is true. Staging writes additionally require the matching native protocol marker. Any future production enablement needs a separate reviewed patch tying a default-off switch to the installed release identity and approved staging evidence, with independent review of all installed writers and a maintenance-window authorization. Do not use an environment rename or the old direct-SQL bot to bypass the gate. Keep native sync/graduation disabled under their existing release holds.
+
+## Shutdown and rollback
+
+Keep the bridge closed and stop new state decisions, filing and relevant workers before changing code. Drain transactions and record the affected PIREP IDs, receipts, counters, ledger, awards and queued notifications. For an authorized staging rollback, restore the previous exact PHP files and admin assets together; the two additive columns can remain for reconciliation. Disable or isolate still-pending notification jobs before reloading workers. Review already committed effects case by case before correcting the ledger or totals. Restoring a previous code build cannot reverse those effects. Require an approved reconciliation and backup restore plan before any destructive database change or production action.
+
+
+===== docs/training-deployment-runbook.md =====
+# Training system staging and deployment runbook
+
+Use the [P05 release verdict](training-p05-readiness.md) as the production gate. Rehearse the procedure on isolated infrastructure first. P05 denies bridge decisions outside Laravel staging and testing even when the flag is set. Keep the actual production environment and the bridge decision flag unchanged.
+
+For P06 releases, also follow the [P06 installation and staging procedure](training-p06.md). Apply migration 008 before registering new training commands. Keep VUSCG_TRAINEE_RATING_SYNC_ENABLED false until the native rating model, primary connection and ownership marker are proven. During initial rehearsal or emergency shutdown set TRAINING_INSTRUCTION_DELIVERY_ENABLED=false and stop the applicable workers before rolling back. P06 does not lift any P05 release hold.
+
+P07 adds a distinct training schema path for MySQL 5.7.44. Follow the read-only version/schema preflight and the staging import gate before any migration. [Compatibility audit](training-p07-mysql57-compatibility.md) · [phpMyAdmin staging procedure](training-p07-phpmyadmin-installation.md)
+
+## 1. Preflight and backups
+
+1. Record the exact commit, branch, lockfile and previous bot release. From the reviewed checkout run `git status --short --branch`, `git rev-parse HEAD`, `npm ci`, and `bash scripts/test-training-release.sh` on Node 24. Keep the evidence. The legacy deploy helper checks out main and assumes a particular filesystem and PM2 process. Use the verified release and supervisor.
+2. Obtain the exact installed phpVMS build, dependency lockfile, route list, VuscgCustom files, other installed modules, listeners and authorization configuration. Audit the configured DB connections, cache namespace, queue settings, HTTPS ingress, and every report writer. Compare to the reviewed Laravel 10 reference. Identify downtime and maintenance windows.
+3. Provision a separate sanitized database, website, HTTPS host, Discord application and staging guild. Use separate credentials, a bot absent from the production guild, and test-only test pilot accounts, staff links, aircraft, ranks, permissions, training channels and private threads. Route mail, broadcasts, webhooks and queues to test sinks. Verify the Members intent, Manage Roles and hierarchy, and thread access. Use staging mapping overrides for the training features. Review legacy commands and startup tasks with hard-coded role/channel IDs before exercising them in the test guild.
+4. Select distinct, authorized read-only, migration, and runtime database accounts. Use verified login-path aliases and schema/destination variables. Confirm the selected schema first.
+
+   ~~~bash
+   mysql --login-path="$READ_LOGIN_PATH" "$APP_DB" < integrations/phpvms7/training-schema-preflight.sql
+   mysql --login-path="$READ_LOGIN_PATH" "$APP_DB" < integrations/phpvms7/qualification-inventory.sql
+   ~~~
+
+   Verify ID plus name for each award and role. Verify IP permissions, Laratrust guard, pivot morph mapping, teams setting and cache invalidation. Resolve each exact rating code against the actual column. Verify the configured CGAS tour award ID is distinct from all qualification award IDs. Inspect engine, column types, indexes and keys, including unique Discord-link identities and PIREP state/ID columns.
+5. Pause affected writers for DDL, inventory open transactions and free space, and record current flags, schemas and counts. Take an approved backup in a restricted location.
+
+   ~~~bash
+   umask 077
+   mysqldump --login-path="$BACKUP_LOGIN_PATH" --single-transaction "$APP_DB" > "$BACKUP_FILE"
+   ~~~
+
+   Include affected tables and the routines, triggers, events, code and configuration required by the installation’s backup plan. Verify restoration into a separate disposable schema. Protect all backups and test evidence. Confirm ownership-marker rollbacks and partial delivery review before advancing.
+
+## 2. Database migration ledger
+
+MySQL 5.7.44 and MySQL 8.4 with InnoDB are tested with distinct training migration paths. Record the commit, checksum and exact statements applied. MySQL DDL can lock tables and statements can commit independently. Budget index builds and table alteration time on representative staging data. Inspect the schema after partial failures before retrying. Keep DDL privileges out of runtime accounts.
+
+| File | Dependencies and privileges | Changes and repeat behavior |
+| --- | --- | --- |
+| 001 CGAS | Existing CGAS deployment, CREATE and indexes | Creates two InnoDB CGAS tables using JSON and unique keys. Repeat preserves rows. No native foreign keys. |
+| 002 CGAS historical | 001 and ALTER | Adds optional historical campaign fields. Apply once if used. Does not itself queue the campaign. |
+| 003 CGAS native award | 001 and ALTER/INDEX | Adds native CGAS delivery columns. Apply once if used. Previously detected completions can queue after enabling CGAS delivery. Pause the worker before separately scheduling a rollout. |
+| [Bridge nonces](../integrations/phpvms7/bridge-nonces.sql) | CREATE and indexes | Creates the durable HMAC nonce table. Repeat preserves rows. Bridge runtime needs INSERT and approved expiry cleanup needs DELETE. Use the retention window in the P01 guide. |
+| [004 (8.4)](../migrations/004_training_records.sql) or [004 (5.7)](../migrations/mysql57/004_training_records.sql) | CREATE, indexes, REFERENCES, seed INSERT/UPDATE | Creates programs, lessons, enrollments, and records. FKs stay within training. 5.7 adds the integrity guard and final source enum. Verify the source and void CHECKs or guard FKs for the selected profile. Rerunning preserves edited rows and seeds. |
+| [005 (8.4)](../migrations/005_training_pirep_link.sql) or [005 (5.7)](../migrations/mysql57/005_training_pirep_link.sql) | 004 and ALTER/INDEX | Both add the generated-column uniqueness index. The 8.4 file also extends the enum and replaces the source CHECK. One-time, with potential rebuild and metadata locks. |
+| [006 (8.4)](../migrations/006_training_qualifications.sql) or [006 (5.7)](../migrations/mysql57/006_training_qualifications.sql) | 004–005, CREATE, indexes, REFERENCES, seed INSERT/UPDATE | Adds catalog, immutable events, status projection, import staging and delivery audit/outbox. FKs stay within training. 5.7 uses guard FKs for actor and revoke reason. Repeat preserves rows and scopes. |
+| [007](../migrations/007_training_native_ownership.sql) | 006 and positively verified native pivots, ALTER/INDEX | Adds a nullable unique ownership marker to each opted-in pivot. Existing assignments remain unmarked. Apply each statement once, individually. Review storage, metadata locks and whether native models can safely preserve the marker. |
+| [008](../migrations/008_training_materials_and_delivery.sql) | 004–006, CREATE, INDEX, REFERENCES, seed INSERT/UPDATE | Adds categories, links, event snapshots and delivery audits. Repeat preserves records and configuration. 007 is required only for the enabled native targets. |
+
+Apply only verified, unapplied statements. For a fresh training schema, set `TRAINING_MIGRATION_DIR` to the path returned by the preflight (`migrations/mysql57` on 5.7.44 or `migrations` on 8.4). For each file, verify the server, selected staging schema and previous step before running its command from the reviewed checkout. Use the session initializer for 007, 008 and other manually applied write files as well.
+
+~~~bash
+mysql --login-path="$MIGRATION_LOGIN_PATH" --skip-reconnect --init-command="SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" "$APP_DB" < "$TRAINING_MIGRATION_DIR/004_training_records.sql"
+mysql --login-path="$MIGRATION_LOGIN_PATH" --skip-reconnect --init-command="SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" "$APP_DB" < "$TRAINING_MIGRATION_DIR/005_training_pirep_link.sql"
+mysql --login-path="$MIGRATION_LOGIN_PATH" --skip-reconnect --init-command="SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" "$APP_DB" < "$TRAINING_MIGRATION_DIR/006_training_qualifications.sql"
+~~~
+
+Apply the bridge nonce schema separately before authenticated staging calls. Apply each verified 007 ALTER from the committed file separately, with the targets disabled. Record partial completion and compare the preflight and SHOW CREATE TABLE after each statement. A different pivot or Laravel authorization model blocks that target. Existing deployments should inventory 001–003 and preserve CGAS data. Apply 008 after 006 and any approved 007 statements. Keep strict mode and foreign-key enforcement enabled on application sessions. Follow the linked P07 recovery procedure if root 004 or 006 was previously run on 5.7.
+
+The website models and queue must share the same primary. Runtime users need scoped read and write access for the features they run. Native permissions are limited to verified assignments and ownership-filtered deletion. Rank graduation needs the reviewed rank-update permission. Validate counts, scopes, replay keys, checks, and markers against the baseline. Example post-migration read-only queries:
+
+~~~sql
+SELECT program_id, COUNT(*) AS lessons FROM vuscg_training_lessons GROUP BY program_id;
+SELECT source, COUNT(*) AS records FROM vuscg_training_records GROUP BY source;
+SELECT target, state, COUNT(*) AS jobs FROM vuscg_training_qualification_sync GROUP BY target, state;
+SELECT s.user_id, s.qualification_id, s.program_id
+FROM vuscg_training_qualification_status s
+LEFT JOIN vuscg_training_qualification_events e ON e.event_id = s.last_event_id
+WHERE e.event_id IS NULL OR e.user_id <> s.user_id
+   OR e.qualification_id <> s.qualification_id OR e.program_id <> s.program_id
+   OR s.active <> (e.action = 'grant');
+SELECT pilot_id, COUNT(*) AS links FROM discord_links GROUP BY pilot_id HAVING COUNT(*) > 1;
+~~~
+
+The state/event mismatch result must be empty. Review duplicate or missing links before role synchronization. For P04 upgrades, inspect historical jobs and any already delivered historical side effects. P05 retires previously queued historical jobs without external effects. An earlier delivery needs separate supervised reconciliation with the existing audit.
+
+## 3. Website preparation
+
+1. Back up VuscgCustom and its configuration. For bridge testing, copy the approved bridge controller, Services/PirepDecisionGate.php and config/vuscg_pirep_review.php to their matching paths. Merge the bridge route group into the installed API file and preserve unrelated module routes. Verify HTTPS trusted proxies, path prefix, body limits, UTC clocks, nonce expiry and rate limits. Supply a dedicated secret through environment settings.
+2. Copy the approved Console/SyncQualifications.php, Services/NativeSyncDatabase.php, Services/QualificationNativePlan.php, Services/TraineeRatingPlan.php and config/vuscg_qualifications.php to their matching paths. Merge console registration in the installed provider as described in the [P04 guide](training-p04.md). Use the verified existing native model/event APIs and retain all other module functionality.
+3. Keep PIREP_BRIDGE_DECISIONS_ENABLED, VUSCG_QUALIFICATION_SYNC_ENABLED, VUSCG_TYPE_RATING_SYNC_ENABLED, VUSCG_IP_ROLE_SYNC_ENABLED, and VUSCG_TRAINEE_RATING_SYNC_ENABLED false. Keep schedules stopped. In the verified phpVMS installation directory run:
+
+   ~~~bash
+   php artisan config:clear
+   php artisan route:clear
+   php artisan route:list --path=api/vuscgcustom/pirep-review
+   php artisan list vuscg
+   php artisan vuscg:sync-qualifications
+   ~~~
+
+   Verify the last command reports disabled and changes no jobs or native rows. Rebuild configuration and route caches if the app normally uses them. Safeguard cached configuration and reload the verified long-running processes. Enable staging bridge decisions only while executing isolated tests with APP_ENV=staging or testing and return the flag to false afterward.
+
+## 4. Discord installation and staged enablement
+
+1. Verify the test token, application, guild, database, staff roles, training thread and private fallback parent, and HTTPS PIREP link/bridge hosts. Use the role variables and exact rank name from the [P04 guide](training-p04.md). Leave TRAINING_GRADUATION_ENABLED=false.
+2. Stop the old bot before registering or starting its replacement. In the approved checkout run `node deploy-commands.js`, which exits nonzero if Discord rejects registration. Verify the intended guild has the complete registration set, including training and qualification and the legacy command retirement. Start with `node index.js` or the verified supervisor configuration. Rehearse this handover on staging. Never overlap a legacy promotion writer and the graduation worker.
+3. Enable one lane at a time after verifying its configuration. First deliver awards and observe the audit. Use `php artisan vuscg:sync-qualifications --event=<event-uuid>` for individual fixture events. Then enable type ratings and verify both training tracks. Separately enable IP role sync and verify permissions in a fresh Laravel session. Enable Discord graduation only after native MR dependencies, account linkage, ranks and Discord role mappings are proven. Refresh configuration and reload workers between stages.
+
+## 5. Staging acceptance matrix
+
+Capture the exact build, schema, fixture IDs, role used, before/after counters, event IDs, message IDs, pass/fail and hold-point decision. Use restricted test data and redact secrets.
+
+| Scenario | Required evidence |
+| --- | --- |
+| Registration and standalone signoffs | Exercise staging commands and ordinary versus staff access. Enroll RW and save standalone training once. Verify ephemeral comments and failure on stale/unauthorized confirmation. |
+| Native PIREP and linked training | File and accept a disposable report. Validate accounting separately. Record linked training, reject wrong-owner evidence, simulate stale PIREP state, try a duplicate and void an attempt. Acceptance alone earns no training credit. Verify reopening the existing private thread and notification failure recovery. |
+| Explicit Rotary MR | Complete configured RW slots and confirm no grant or rank write. Instructor Pilot grants RW MR. Observe verified award, HELI_USCG persistence before TRNHELI removal, unchanged FW trainee rating, ENS 12 to LTJG 13 once, Pilot/RW/O-2 designations where appropriate, nickname and a single private announcement. |
+| Fixed Wing and senior rank | Grant FW MR to the same pilot and a separate senior pilot. Verify FW_CG before FWTRN removal, existing RW designations, unchanged LTJG and senior ranks, and no duplicate announcement. |
+| Specialty and IP | BLACKJACK award 8 plus INTAPP, MQ9 inventory-verified award plus UAV, HITRON award 7 and unchanged ratings, DLQ unchanged ratings. Refuse an Instructor Pilot's IP grant and every instructor revocation. Command Staff grants IP and verifies the existing native role and permissions. |
+| Revocation and recovery | Preserve preexisting native assignments and previously earned rank. Verify a missing mapping, disabled lane, wrong identity, DB or Discord outage and ambiguous send. Confirm visible retry and recovery. Stage reviewed synthetic historical rows and verify no external work. |
+| Existing workflows | Verify /activate, /manualpirep, /mission, /jumpseat, /location, /myactivity, /myairports, /mycgas, /cgasleaderboard, /moveaircraft, /activity90, /forceranksync and /help with staging fixtures and settings. Check hourly rank sync and CGAS announcements/awards. |
+
+### Native accounting tests
+
+Copy PirepReviewBridgeTest.php and QualificationNativeSyncFeatureTest.php from integrations/phpvms7/tests into the approved isolated phpVMS tests/Feature directory. Use the runtime’s testing bootstrap. Set PIREP_BRIDGE_TEST_PENDING_ID for the delegation fixture and PIREP_BRIDGE_TEST_NATIVE_PENDING_ID for a dedicated pending flight with a pilot, aircraft, valid fuel, positive duration and destination. Set VUSCG_QUAL_TEST_PILOT_PUBLIC_ID for an isolated pilot without the configured DLQ award or IP role. Confirm the connection is isolated before running:
+
+~~~bash
+php artisan test --filter=PirepReviewBridgeTest
+php artisan test --filter=QualificationNativeSyncFeatureTest
+~~~
+
+Capture the exact test outcomes, including skips. The rollback test injects an isolated synchronous failure during acceptance and checks real pilot, PIREP and aircraft rows. Run deployed listeners separately with safe test sinks. Verify their registration, queue after-commit settings and side effects independently of dispatch counts.
+
+For concurrency, use separate workers/sessions and a fresh disposable PIREP per case. Exercise the actual staging surfaces and capture overlapping timestamps or database lock traces. Repeat each direction/order:
+
+| Pair or fault | Pass criterion |
+| --- | --- |
+| Two Discord approves and a sequential repeat | One transition and one award-processing/acceptance dispatch. Pilot minutes + flight duration, flights +1 and aircraft minutes + duration. Subsequent requests observe existing state. |
+| Discord approve and reject | Exactly one pending transition. Acceptance-first credits once. Rejection-first adds none. |
+| Discord approve and native admin approve | Exactly one native accounting result, with unchanged pilot/aircraft counters on any replay. Test every relevant accepting writer and intentional native reversal behavior separately. Passing some schedules does not prove shared locking. |
+| Timeout and explicit retry | Interrupt or delay a staging response, check status reconciliation, then retry as an operator. No second credit. |
+| Previously accepted and injected failure | Previously accepted stays unchanged. Injected failure returns the original PIREP state, counters, rank, fuel, locations and last report. Compare award pivots, listener counts and external traces. |
+
+If any competing writer fails the check, keep the bridge gate closed. An exclusive-writer mitigation requires verified enforcement across admin, API, auto-approval, background work and any direct writers. Operator convention is insufficient.
+
+## 6. Production hold, stop and rollback
+
+1. Require signed staging evidence, verified mappings, a reviewed previous release and resolution of all production holds. Keep bridge decisions disabled in P05. Use the approved backup/DDL window, release commit and supervisor. Apply the measured staging order and stop the old bot before replacing its promotion command. Keep effects separated by flag during cutover.
+2. Smoke-test correct registration, audit visibility, account linkage, private access, CGAS and normal rank behavior. Observe native award/rating/permission checks for approved test pilots and reconcile audit evidence. Validate PIREP accounting from authorized observations. Monitor queue backlog, retries, Discord rate limits, unexpected side effects and native logs.
+3. For immediate shutdown, stop the bot and qualification scheduler, set graduation and award/rating/IP flags false, and keep bridge decisions false. Refresh Laravel configuration and reload or drain old workers. Disable decision ingress if needed. Verify effects have stopped, retain queues, cached PIREP message references and audit data, and reconcile in-flight jobs.
+4. For rollback, restore the reviewed previous bot and module/config files, then register the previous command payload with workers and legacy promotion disabled until the overlap risk is addressed. Preserve schemas, marker columns, qualification history and backups. Fetch native effect evidence for partly delivered jobs and resolve with Command Staff. Preserve replay nonces through their retention window. Require an approved restoration plan before dropping columns, discarding history, restoring an old database snapshot or reactivating the legacy writer.
+
+
+===== docs/training-p07-phpmyadmin-installation.md =====
+# P07 installation rehearsal with cPanel phpMyAdmin
+
+This procedure is for an explicitly authorized, isolated staging copy. Use a sanitized schema, staging phpVMS installation and Discord application/guild, and test-only credentials and delivery sinks. The supplied production identifiers are `vuscgco1_finalphp` and `/home/vuscgco1/crew.vuscg.com/`. Use these to recognize the live installation and stop if phpMyAdmin or the web configuration points there. Confirm the staging website path with its operator. [Release gates](training-p07-mysql57-compatibility.md) · [Operational runbook](training-deployment-runbook.md)
+
+## Before importing
+
+1. Verify the checkout is the reviewed P07 commit on `develop/training-system`. Record the commit, SQL filenames and checksums, the approved staging schema, and its server version. Review and stop the affected staging bot, scheduled native worker, and any phpVMS writers that can touch tables being altered. Disable the applicable feature flags before rehearsing DDL.
+2. In cPanel, confirm the database account has `SELECT` for the inventory and authorized export. For the selected schema the migration account also needs `CREATE`, `ALTER`, `INDEX`, `REFERENCES`, and the `INSERT`/`UPDATE` required by seeds and ALTER operations. Check hosting grants and phpMyAdmin upload/time limits first. Running as a database server administrator or installing routines/triggers is unnecessary. Keep DDL privileges out of bot/web runtime credentials. The runtime account needs visibility of the training tables and access to its own schema metadata.
+3. Select the approved **staging** database in the left tree. Open **SQL** and run the read-only preflight file. Check the schema in the first output row, the expected version, and `foreign_key_checks = 1`. The read-only preflight can run with the server’s default SQL mode, including an empty value. Establish strict mode in each migration session before any writes. The preflight reports the version-specific migration path and existing table/column/index/constraint inventory. The native pivots must be InnoDB. Stop on an unexpected version, engine, schema or partial state. [Read-only preflight SQL](../integrations/phpvms7/training-schema-preflight.sql)
+4. From the selected staging database use **Export → Custom → SQL**. Include structure and data, preserving keys and all relevant objects the account can back up. Ask the operator/provider to include any required views, triggers, routines, events, code and configuration that your export cannot capture. Store the backup and checksum in approved restricted storage. Restore it to a *second* disposable schema using authorized backup tooling. Compare critical row counts and `SHOW CREATE TABLE` for table definitions, pivots and existing training tables. Verify keys, seed customizations and permissions; record the restore result before running DDL.
+5. Review the native inventory and exact definitions of `users`, `pireps`, `discord_links`, `awards`, `roles`, `typeratings` and all three pivots. For the installed role confirm teams, morph type, native permissions, and cache behavior in Laravel. For awards inventory missing or ambiguous mappings. Check `SELECT user_id, award_id, COUNT(*) FROM user_awards GROUP BY user_id, award_id HAVING COUNT(*) > 1` and inspect any returned rows without deleting or merging them. [Native inventory SQL](../integrations/phpvms7/qualification-inventory.sql)
+
+## Import order and checkpoints
+
+phpMyAdmin may open a new database session for every SQL request or import. A successful `SET SESSION` in an earlier tab submission does not carry over. For **each** migration file or individual ALTER, place the following at the start of the **same** SQL submission as the migration statements. For **Import → Choose File → SQL → Import**, add the prefix to a temporary copy of that one file and leave the tracked migration unchanged.
+
+~~~sql
+SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION';
+SELECT DATABASE(), VERSION(), @@SESSION.sql_mode, @@SESSION.foreign_key_checks;
+-- Append the exact migration file or the individually reviewed 007 ALTER below.
+~~~
+
+Before submitting any DDL, run a separate read-only preflight to verify the database, version and FK setting. Submit the migration with the prefix in a stop-on-error import or session. Expect both SQL modes shown above and `foreign_key_checks = 1` in the result. If stop-on-error or single-session execution is uncertain, use a verified MySQL client session instead. Disable automatic continuation, resume, and any option that disables foreign-key checks. If you split a migration across SQL submissions, repeat the prefix in every one. Keep the 5.7 files' SET/PREPARE/EXECUTE/DEALLOCATE guard block together and run it before the file's DDL. Stop on any error and verify each checkpoint before proceeding. Keep the 8.4 files out of the 5.7 import list.
+
+| Order | File | Checkpoint |
+| --- | --- | --- |
+| 1–3 | [001](../migrations/001_cgas_tour.sql), [002](../migrations/002_cgas_historical_announcements.sql), [003](../migrations/003_cgas_phpvms_awards.sql) | On a fresh CGAS fixture, apply in order. On an already installed clone inventory and preserve CGAS. 001 yields `bot_cgas_tour_versions` and `bot_cgas_completions`. 002 adds the two `historical_announcement_*` fields. 003 adds the four `award_*` fields and `ix_bot_cgas_award_work`. 002 and 003 each apply once. Keep the CGAS workers paused through any changes. |
+| Separate P01 prerequisite | [bridge-nonces.sql](../integrations/phpvms7/bridge-nonces.sql) | `SHOW CREATE TABLE vuscg_pirep_review_nonces` shows InnoDB, the nonce primary key and expiry index. Bridge decisions stay disabled outside the approved isolated tests. |
+| 004 | [5.7.44](../migrations/mysql57/004_training_records.sql) · [8.4](../migrations/004_training_records.sql) | Programs, lessons, enrollments and records exist. For a fresh fixture RW and FW each have nine lessons and Stage Zero is disabled. 5.7 also has the one-valued integrity table plus source and void FKs. 8.4 has the original source and void CHECKs. |
+| 005 | [5.7.44](../migrations/mysql57/005_training_pirep_link.sql) · [8.4](../migrations/005_training_pirep_link.sql) | `SHOW CREATE TABLE vuscg_training_records` shows the `pirep` source, stored `active_pirep_evaluation` column and six-column `uq_training_pirep_evaluation` unique index. Existing manual and imported rows and their IDs are retained. Apply once. |
+| 006 | [5.7.44](../migrations/mysql57/006_training_qualifications.sql) · [8.4](../migrations/006_training_qualifications.sql) | The six qualification tables and six seeded qualification codes exist. Verify event guard FKs on 5.7 or enforced qualification CHECKs on 8.4; verify the status, delivery and attempt keys. |
+| 007, optional per native target | [007](../migrations/007_training_native_ownership.sql) | Execute each opted-in ALTER as its own SQL submission after native adapter review. Verify the new nullable ASCII binary owner column and its single-column unique index immediately on that table. Existing assignments must stay unmarked on first installation. Keep each native target off until its own verification. Qualifying and enrollment rating workers both need the rating pivot marker. |
+| 008 | [008](../migrations/008_training_materials_and_delivery.sql) | Check the six resource/instruction tables, composite FK to enrollments, and eight initial categories. In MySQL 5.7, verify the `event_seq` unique auto-increment ordering column. Existing resource snapshots and audit rows are retained. |
+
+Read-only checks can run in a later phpMyAdmin session. Its SQL mode can be empty even after a successful strict migration, so use migration-session output to verify the write settings. Use `SHOW CREATE TABLE` to verify each checkpoint. For example, after the relevant files:
+
+```sql
+SELECT DATABASE(), VERSION(), @@session.sql_mode, @@session.foreign_key_checks;
+SHOW CREATE TABLE vuscg_training_records;
+SHOW CREATE TABLE vuscg_training_qualification_events;
+SHOW CREATE TABLE vuscg_training_instruction_events;
+SELECT program_id, COUNT(*) AS lessons FROM vuscg_training_lessons GROUP BY program_id;
+SELECT qualification_id, scope FROM vuscg_training_qualifications ORDER BY qualification_id;
+SELECT category_id FROM vuscg_training_resource_categories ORDER BY category_id;
+SELECT TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX, NON_UNIQUE, COLUMN_NAME
+FROM information_schema.STATISTICS
+WHERE TABLE_SCHEMA = DATABASE() AND INDEX_NAME IN
+  ('uq_training_pirep_evaluation','uq_user_awards_vuscg_owner','uq_role_user_vuscg_owner','uq_type_rating_vuscg_owner')
+ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX;
+```
+
+On 5.7, run this additionally after 006. Expect exactly four relationships, with the corresponding stored generated columns defined in `SHOW CREATE TABLE`. The parent query returns one row with `allowed = 1`.
+
+```sql
+SHOW CREATE TABLE vuscg_training_integrity_guard;
+SELECT id, allowed FROM vuscg_training_integrity_guard;
+SELECT TABLE_NAME, CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_COLUMN_NAME
+FROM information_schema.KEY_COLUMN_USAGE
+WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_SCHEMA = DATABASE()
+  AND REFERENCED_TABLE_NAME = 'vuscg_training_integrity_guard'
+ORDER BY TABLE_NAME, CONSTRAINT_NAME;
+```
+
+Verify each opted-in 007 statement with `SHOW CREATE TABLE user_awards`, `SHOW CREATE TABLE role_user`, or `SHOW CREATE TABLE typerating_user`. Compare existing keys and association counts against the backup. For each newly marked table, `SELECT COUNT(vuscg_qualification_owner) FROM <confirmed_pivot>` returns zero before any worker runs. Use a staging test pilot to prove that unauthorized qualification actions fail and an invalid source, incomplete void or duplicate active evaluation cannot be committed. Run the repository test matrix before the rehearsal.
+
+## Maintenance window, failures and recovery
+
+- MySQL DDL commits implicitly. 005 can rebuild or lock the training records table. 002/003 can affect the CGAS tables. Each 007 ALTER builds an index on an existing native pivot and can block writers, take disk space or rebuild a table. Measure impact with representative staging data, confirm free space and obtain a maintenance window. Even additive 004/006/008 can wait on metadata locks of referenced tables.
+- After failure, leave workers stopped. Save the exact submitted statement/error and inspect the selected schema with the preflight and `SHOW CREATE TABLE`. Check whether a timed-out import is still running with the staging operator. 005 must show both the generated column and the unique index. 007 may have succeeded on only a subset of pivots. Apply only the missing complete statement after verification. If a table has only part of a statement's intended shape, stop and review its definition and data before using any corrective DDL.
+- A 5.7 schema that previously used the root 004 or 006 may contain rows with no corresponding guards. The alternate files deliberately stop on those existing tables. Preserve rows, inventory and reconcile invalid records offline, and use a separately reviewed recovery or approved restore before proceeding. Repeatable CREATE/seed statements do not repair an incorrect definition.
+- For rollback, restore the previous reviewed bot/module files and configuration only when compatible with the retained schema. Keep queues, history, ownership markers, bridge nonces and backups. Resolve partial native deliveries with the visible audit trail. A database restore requires an approved plan for changes since the snapshot and a proven restore into a separate schema first. This procedure does not drop or replace tables.
+
+## Runtime configuration
+
+The bot and training import scripts initialize strict mode before using each pool checkout. The native qualification and trainee-rating command uses a separate nonpersistent Laravel writer session with strict mode and the same database primary. Copy `Services/NativeSyncDatabase.php` alongside the updated `Console/SyncQualifications.php` in VuscgCustom. Keep the website’s existing `config/database.php` setting and server-wide SQL mode. The native worker requires the installed Laravel MySQL connector and the `vuscg_native_sync` connection name available for its command-local configuration. The guarded 5.7 schema and `foreign_key_checks = 1` are still required. Confirm the native models resolve to the scoped writer on the installed phpVMS build and rehearse any queued award listeners. Runtime initialization does not configure phpMyAdmin sessions.
+
+## Configure and rehearse in stages
+
+1. Start with `PIREP_BRIDGE_DECISIONS_ENABLED=false`, `VUSCG_QUALIFICATION_SYNC_ENABLED=false`, `VUSCG_TYPE_RATING_SYNC_ENABLED=false`, `VUSCG_IP_ROLE_SYNC_ENABLED=false`, `VUSCG_TRAINEE_RATING_SYNC_ENABLED=false`, `TRAINING_GRADUATION_ENABLED=false` and `TRAINING_INSTRUCTION_DELIVERY_ENABLED=false`. Stop the relevant scheduler or bot, refresh Laravel's config and route cache using the staged deployment procedure, and verify the site and bot connections both use the approved writers.
+   The supplied values to recheck and then set on staging are `VUSCG_TYPE_RATING_CODE_COLUMN=type`, `VUSCG_IP_ROLE_ID=2`, `VUSCG_IP_ROLE_NAME=instructor-pilot`, and `TRAINING_GRADUATION_RANK_NAME="O-2 Lieutenant (junior grade)"`. Provide `VUSCG_QUALIFICATION_AWARDS` as a reviewed ID-and-exact-name map. Leave MR, MQ9, DLQ and IP unmapped until approved.
+
+2. Validate core training commands, permissions, linked reports already accepted natively, and private threads. In the staging guild enable instructional messages alone and prove delivery, retry, duplicate prevention and Stage Zero. Keep bridge decisions off by default and return them to false after each authorized isolated native test. P05's native accounting concurrency gate remains critical.
+3. After native evidence, enable one verified synchronization lane at a time. First exercise awards with verified mappings and nonoverlapping CGAS assignments. Then validate the qualification rating and separate trainee rating lane, exact `typeratings.type` codes, delayed jobs, and two-track safety. Verify the existing IP role independently with Command Staff using its native authorization/cache behavior. Graduation comes last, after scoped native MR award and qualified rating delivery plus Discord link, role and rank verification. Keep any lane with missing mapping, failed staging evidence or an unresolved blocker disabled.
+4. To stop effects, disable the flags, stop the bot and qualification scheduler, and refresh/reload the staged PHP and bot configuration. Preserve receipts, outboxes and native state for reconciliation. Review ambiguous/in-flight effects before replaying. [Operational installation and rollback](training-deployment-runbook.md)
+
+For a hosting upgrade, require a provider-supported plan with backups and rehearsed restoration. If using a logical migration to a new 8.4 server, preserve existing 5.7 guards and history. Do not rerun root 004–006 over that restored schema. [Compatibility and hosting options](training-p07-mysql57-compatibility.md)
+
+
+===== integrations/phpvms7/pirep-concurrency/admin-review-revision.blade.php =====
+{{-- Include inside each PIREP action group. Give the group the data-vuscg-pirep-review attribute. --}}
+<input type="hidden" name="review_revision"
+       value="{{ $vuscgReviewRevision ?? \App\Services\PirepService::reviewRevision($pirep) }}">
+@if (!empty($vuscgReviewConflict))
+    <p role="status">This PIREP changed before your decision was saved. Review its current state and choose again.</p>
+@endif
+
+
+===== integrations/phpvms7/pirep-concurrency/candidate-source.sha256 =====
+55eae2f4122f7beb0e7ddb57e59755d64455be27ade3582608c4890c91ff79ef  app/Cron/Hourly/DeletePireps.php
+f548c3f036fe660ee2a05b03bd20696af45acc02b42081ebae7d8e82fb41eff0  app/Events/PirepFiled.php
+f7d049d843ebc770cc749b5b0fe10eb124322e9a796e0457e393050e4304f3ef  app/Http/Controllers/Admin/PirepController.php
+7fd6e4ce34c18a20519646f114d5f5f13a053dd323a27556bfe6bf77379c39cb  app/Http/Controllers/Api/PirepController.php
+bb2b4b34a54e5f2684532f93b09f02285552e31c2ef70aee56728781f0865f98  app/Listeners/DiversionHandler.php
+6e3ad99db24810bfc80c533452eaf5deec03ff16e2f20c7679eab7b5c48db600  app/Notifications/NotificationEventsHandler.php
+0d1ef4136c5e0fe4612f852457769cde4b35593d98573bbc574453ce1d0a75de  app/Services/AircraftService.php
+3711d7f692263bfed41c45fe5b53774c734bb1f479ae91ece073155d099108f6  app/Services/PirepAfterCommit.php
+98175b7b7a68e809b0dafbc134386536fe44b0fc7201f5e4f70b707ce488c085  app/Services/PirepService.php
+64711c71f89d9bb02fa7b1a30206b8bb64568da65e51f7dc059a8236565a7507  app/Services/UserService.php
+382f8ee4a816ae2b56a20ebb07ca841c2909e66cd417a8821070572eefa9d416  modules/DisposableBasic/Listeners/Gen_AutoReject.php
+
+
+===== integrations/phpvms7/pirep-concurrency/installed-source.patch =====
+diff --git a/app/Cron/Hourly/DeletePireps.php b/app/Cron/Hourly/DeletePireps.php
+index 4c75e409854bffc9d9e388851456be2bd9385f27..0a1225af2cf8fe0565a1cb2a225a0a2613da21d5 100644
+--- a/app/Cron/Hourly/DeletePireps.php
++++ b/app/Cron/Hourly/DeletePireps.php
+@@ -49,7 +49,9 @@ class DeletePireps extends Listener
+         /** @var Pirep $pirep */
+         foreach ($pireps as $pirep) {
+             Log::info('Cron: Deleting PIREP id='.$pirep->id.', state='.PirepState::label($state));
+-            $pirepSvc->delete($pirep);
++            $pirepSvc->deleteIfCurrent($pirep, static fn (Pirep $locked): bool =>
++                $locked->state === $state && $locked->created_at->lt($dt) && $locked->status !== PirepStatus::PAUSED
++            );
+         }
+     }
+ }
+diff --git a/app/Events/PirepFiled.php b/app/Events/PirepFiled.php
+index 05696c3716a0b0af13727861daa897bc69f178b1..5a6119d605606c437e8945b3bca001361da228d2 100644
+--- a/app/Events/PirepFiled.php
++++ b/app/Events/PirepFiled.php
+@@ -9,7 +9,7 @@ class PirepFiled extends Event
+ {
+     public Pirep $pirep;
+ 
+-    public function __construct(Pirep $pirep)
++    public function __construct(Pirep $pirep, public bool $underFilingLock = false)
+     {
+         $this->pirep = $pirep;
+     }
+diff --git a/app/Http/Controllers/Admin/PirepController.php b/app/Http/Controllers/Admin/PirepController.php
+index d4f285ab95f59cf402f2be6dec455f1f6fd370e7..482712dfe233450d151fac63ab88424cd067517c 100644
+--- a/app/Http/Controllers/Admin/PirepController.php
++++ b/app/Http/Controllers/Admin/PirepController.php
+@@ -3,6 +3,7 @@
+ namespace App\Http\Controllers\Admin;
+ 
+ use App\Contracts\Controller;
++use App\Exceptions\PirepError;
+ use App\Http\Requests\CreatePirepRequest;
+ use App\Http\Requests\UpdatePirepRequest;
+ use App\Models\Enums\PirepSource;
+@@ -195,14 +196,19 @@ class PirepController extends Controller
+     public function store(CreatePirepRequest $request): RedirectResponse
+     {
+         $attrs = $request->all();
+-        $pirep = $this->pirepRepo->create($attrs);
++        unset($attrs['vuscg_review_revision'], $attrs['vuscg_filing_pending']);
++        if (isset($attrs['state']) && (int) $attrs['state'] === PirepState::ACCEPTED) {
++            Flash::error('Create a pending PIREP and approve it separately to credit the flight.');
+ 
+-        $hours = (int) $attrs['hours'];
+-        $minutes = (int) $attrs['minutes'];
+-        $pirep->flight_time = Time::hoursToMinutes($hours) + $minutes;
++            return redirect()->back();
++        }
++        $attrs['flight_time'] = Time::hoursToMinutes((int) $attrs['hours']) + (int) $attrs['minutes'];
+ 
+-        $this->saveCustomFields($pirep, $request);
+-        $this->saveFares($pirep, $request);
++        (new Pirep())->getConnection()->transaction(function () use ($attrs, $request): void {
++            $pirep = $this->pirepRepo->create($attrs);
++            $this->saveCustomFields($pirep, $request);
++            $this->saveFares($pirep, $request);
++        }, 1);
+ 
+         Flash::success('Pirep saved successfully.');
+ 
+@@ -297,27 +303,31 @@ class PirepController extends Controller
+             return redirect(route('admin.pireps.index'));
+         }
+ 
+-        $orig_route = $pirep->route;
+-        $orig_flight_time = $pirep->flight_time;
+-
+-        $attrs = $request->all();
+-
+-        // Fix the time
+-        $attrs['flight_time'] = Time::init(
+-            $attrs['minutes'],
+-            $attrs['hours']
+-        )->getMinutes();
++        try {
++            $this->pirepSvc->withLockedPirep($id, function (Pirep $locked) use ($request): void {
++                $this->pirepSvc->assertEditable($locked);
++                $attrs = $request->all();
++                unset($attrs['state'], $attrs['vuscg_review_revision'], $attrs['vuscg_filing_pending']);
++                $attrs['flight_time'] = Time::init($attrs['minutes'], $attrs['hours'])->getMinutes();
++                $oldRoute = $locked->route;
++                $pirep = $locked->fill($attrs);
++                $this->pirepSvc->invalidateReview($pirep);
++                if (!$pirep->save()) {
++                    throw new PirepError($pirep, 'The PIREP update was declined.');
++                }
+ 
+-        $pirep = $this->pirepRepo->update($attrs, $id);
++                if ($pirep->route !== $oldRoute) {
++                    $this->pirepSvc->saveRoute($pirep);
++                }
++                $this->saveCustomFields($pirep, $request);
++                $this->saveFares($pirep, $request);
++            });
++        } catch (PirepError $error) {
++            Flash::error($error->getMessage());
+ 
+-        // A route change in the PIREP, so update the saved points in the ACARS table
+-        if ($pirep->route !== $orig_route) {
+-            $this->pirepSvc->saveRoute($pirep);
++            return redirect()->back();
+         }
+ 
+-        $this->saveCustomFields($pirep, $request);
+-        $this->saveFares($pirep, $request);
+-
+         Flash::success('Pirep updated successfully.');
+ 
+         return redirect(route('admin.pireps.index'));
+@@ -336,7 +346,17 @@ class PirepController extends Controller
+             return redirect(route('admin.pireps.index'));
+         }
+ 
+-        $this->pirepSvc->delete($pirep);
++        try {
++            if (!$this->pirepSvc->deleteIfCurrent($pirep)) {
++                Flash::error('The PIREP changed. Reload it before deleting.');
++
++                return redirect()->back();
++            }
++        } catch (PirepError $error) {
++            Flash::error($error->getMessage());
++
++            return redirect()->back();
++        }
+ 
+         Flash::success('Pirep deleted successfully.');
+ 
+@@ -348,17 +368,26 @@ class PirepController extends Controller
+      */
+     public function status(Request $request): View
+     {
+-        Log::info('PIREP state update call', [$request->toArray()]);
++        Log::info('PIREP state update call', ['pirep_id' => $request->id]);
+ 
+-        $pirep = $this->pirepRepo->findWithoutFail($request->id);
++        $id = (string) $request->id;
++        $conflict = false;
+         if ($request->isMethod('post')) {
+-            $new_status = (int) $request->post('new_status');
+-            $pirep = $this->pirepSvc->changeState($pirep, $new_status);
++            $target = (int) $request->post('new_status');
++            $revision = $request->post('review_revision');
++            abort_if($revision !== null && (!is_string($revision) ||
++                !preg_match('/\A(?:legacy|[a-f0-9]{32})\z/', $revision)), 422);
++            [$pirep, $changed] = $this->pirepSvc->review($id, $target, $revision);
++            abort_if(!$pirep, 404);
++            $conflict = !$changed && $pirep->state !== $target;
++        } else {
++            $pirep = Pirep::query()->useWritePdo()->findOrFail($id);
+         }
+ 
+-        $pirep->refresh();
+-
+-        return view('admin.pireps.actions', ['pirep' => $pirep, 'on_edit_page' => false]);
++        return view('admin.pireps.actions', [
++            'pirep' => $pirep, 'on_edit_page' => false,
++            'vuscgReviewRevision' => PirepService::reviewRevision($pirep), 'vuscgReviewConflict' => $conflict,
++        ]);
+     }
+ 
+     /**
+diff --git a/app/Http/Controllers/Api/PirepController.php b/app/Http/Controllers/Api/PirepController.php
+index f6ea5d916fe4e7470112eb60ecbaa84a46fed83e..2c203771520e37b75dc4067507f1bdff8a154433 100644
+--- a/app/Http/Controllers/Api/PirepController.php
++++ b/app/Http/Controllers/Api/PirepController.php
+@@ -22,6 +22,7 @@ use App\Models\Acars;
+ use App\Models\Enums\AcarsType;
+ use App\Models\Enums\PirepFieldSource;
+ use App\Models\Enums\PirepSource;
++use App\Models\Enums\PirepState;
+ use App\Models\Pirep;
+ use App\Models\PirepComment;
+ use App\Models\PirepFare;
+@@ -146,7 +147,7 @@ class PirepController extends Controller
+     /**
+      * @param string $id The PIREP ID
+      */
+-    public function get(string $id): PirepResource
++    public function get(string $id, bool $fromPrimary = false): PirepResource
+     {
+         $with = [
+             'aircraft',
+@@ -159,9 +160,9 @@ class PirepController extends Controller
+             'user',
+         ];
+ 
+-        $pirep = $this->pirepRepo
+-            ->with($with)
+-            ->find($id);
++        $pirep = $fromPrimary
++            ? Pirep::query()->useWritePdo()->with($with)->findOrFail($id)
++            : $this->pirepRepo->with($with)->find($id);
+ 
+         return new PirepResource($pirep);
+     }
+@@ -215,31 +216,16 @@ class PirepController extends Controller
+         /** @var User $user */
+         $user = Auth::user();
+ 
+-        /** @var Pirep $pirep */
+-        $pirep = Pirep::find($pirep_id);
+-        $this->checkCancelled($pirep);
+-        $this->checkReadOnly($pirep);
+-
+         $attrs = $this->parsePirep($request);
+         $attrs['user_id'] = Auth::id();
+-
+-        // If aircraft is being changed, see if this user is allowed to fly this aircraft
+-        if (array_key_exists('aircraft_id', $attrs)
+-            && setting('pireps.restrict_aircraft_to_rank', false)
+-        ) {
+-            $can_use_ac = $this->userSvc->aircraftAllowed($user, $pirep->aircraft_id);
+-            if (!$can_use_ac) {
+-                throw new AircraftPermissionDenied($user, $pirep->aircraft);
+-            }
+-        }
+-
+         $fields = $this->getFields($request);
+         $fares = $this->getFares($request);
+-        $pirep = $this->pirepSvc->update($pirep_id, $attrs, $fields, $fares);
++        $pirep = $this->pirepSvc->update($pirep_id, $attrs, $fields, $fares,
++            fn (Pirep $locked) => $this->validateWrite($locked, $user, $attrs));
+ 
+         event(new PirepUpdated($pirep));
+ 
+-        return $this->get($pirep->id);
++        return $this->get($pirep->id, fromPrimary: true);
+     }
+ 
+     /**
+@@ -258,45 +244,29 @@ class PirepController extends Controller
+         /** @var User $user */
+         $user = Auth::user();
+ 
+-        // Check if the status is cancelled...
+-        $pirep = Pirep::find($pirep_id);
+-        $this->checkCancelled($pirep);
+-        $this->checkReadOnly($pirep);
+-
+         $attrs = $this->parsePirep($request);
+-
+-        // If aircraft is being changed, see if this user is allowed to fly this aircraft
+-        if (array_key_exists('aircraft_id', $attrs)
+-            && setting('pireps.restrict_aircraft_to_rank', false)
+-        ) {
+-            $can_use_ac = $this->userSvc->aircraftAllowed($user, $pirep->aircraft_id);
+-            if (!$can_use_ac) {
+-                throw new AircraftPermissionDenied($user, $pirep->aircraft);
+-            }
+-        }
+-
++        $fields = $this->getFields($request);
++        $fares = $this->getFares($request);
+         try {
+-            $fields = $this->getFields($request);
+-            $fares = $this->getFares($request);
+-            $pirep = $this->pirepSvc->file($pirep, $attrs, $fields, $fares);
++            $pirep = $this->pirepSvc->fileAndSubmit($pirep_id, $attrs, $fields, $fares,
++                fn (Pirep $locked) => $this->validateWrite($locked, $user, $attrs));
+         } catch (\Exception $e) {
+             Log::error($e);
+ 
+             throw $e;
+         }
+ 
+-        // See if there there is any route data posted
+-        // If there isn't, then just write the route data from the
+-        // route that's been posted from the PIREP
+-        $w = ['pirep_id' => $pirep->id, 'type' => AcarsType::ROUTE];
+-        $count = Acars::where($w)->count(['id']);
+-        if ($count === 0) {
+-            $this->pirepSvc->saveRoute($pirep);
+-        }
+-
+-        $this->pirepSvc->submit($pirep);
++        return $this->get($pirep->id, fromPrimary: true);
++    }
+ 
+-        return $this->get($pirep->id);
++    private function validateWrite(Pirep $pirep, User $user, array $attrs): void
++    {
++        $this->checkCancelled($pirep);
++        $this->checkReadOnly($pirep);
++        if (array_key_exists('aircraft_id', $attrs) && setting('pireps.restrict_aircraft_to_rank', false)
++            && !$this->userSvc->aircraftAllowed($user, $attrs['aircraft_id'])) {
++            throw new AircraftPermissionDenied($user, $pirep->aircraft);
++        }
+     }
+ 
+     /**
+@@ -395,14 +365,15 @@ class PirepController extends Controller
+      */
+     public function finances_recalculate(string $id, Request $request): AnonymousResourceCollection
+     {
+-        $pirep = Pirep::find($id);
+-        $this->financeSvc->processFinancesForPirep($pirep);
+-
+-        $pirep->refresh();
+-
+-        $transactions = $this->journalRepo->getAllForObject($pirep);
++        return $this->pirepSvc->withLockedPirep($id, function (Pirep $pirep): AnonymousResourceCollection {
++            if ($pirep->state !== PirepState::ACCEPTED) {
++                throw new PirepError($pirep, 'Only an accepted PIREP can have its finances recalculated.');
++            }
++            $this->financeSvc->processFinancesForPirep($pirep);
++            $transactions = $this->journalRepo->getAllForObject($pirep);
+ 
+-        return JournalTransactionResource::collection($transactions['transactions']);
++            return JournalTransactionResource::collection($transactions['transactions']);
++        });
+     }
+ 
+     public function route_get(string $id, Request $request): AnonymousResourceCollection
+@@ -425,39 +396,38 @@ class PirepController extends Controller
+      */
+     public function route_post(string $id, RouteRequest $request): JsonResponse
+     {
+-        // Check if the status is cancelled...
+-        $pirep = Pirep::find($id);
+-        $this->checkCancelled($pirep);
+-
+-        Log::info('Posting ROUTE, pirep_id: '.$id);
+-
+-        // Delete the route before posting a new one
+-        Acars::where([
+-            'pirep_id' => $id,
+-            'type'     => AcarsType::ROUTE,
+-        ])->delete();
++        return $this->pirepSvc->withLockedPirep($id, function (Pirep $pirep) use ($id, $request): JsonResponse {
++            $this->checkCancelled($pirep);
++            Log::info('Posting ROUTE, pirep_id: '.$id);
++
++            // Delete the route before posting a new one
++            Acars::where([
++                'pirep_id' => $id,
++                'type'     => AcarsType::ROUTE,
++            ])->delete();
++
++            $count = 0;
++            $route = $request->post('route', []);
++            if (\count($route) === 0) {
++                return $this->message('No points to add');
++            }
+ 
+-        $count = 0;
+-        $route = $request->post('route', []);
+-        if (\count($route) === 0) {
+-            return $this->message('No points to add');
+-        }
++            foreach ($route as $position) {
++                $position['pirep_id'] = $id;
++                $position['type'] = AcarsType::ROUTE;
+ 
+-        foreach ($route as $position) {
+-            $position['pirep_id'] = $id;
+-            $position['type'] = AcarsType::ROUTE;
++                if (isset($position['id'])) {
++                    Acars::updateOrInsert(['id' => $position['id']], $position);
++                } else {
++                    $acars = Acars::create($position);
++                    $acars->save();
++                }
+ 
+-            if (isset($position['id'])) {
+-                Acars::updateOrInsert(['id' => $position['id']], $position);
+-            } else {
+-                $acars = Acars::create($position);
+-                $acars->save();
++                $count++;
+             }
+ 
+-            $count++;
+-        }
+-
+-        return $this->message($count.' points added', $count);
++            return $this->message($count.' points added', $count);
++        });
+     }
+ 
+     /**
+@@ -465,13 +435,11 @@ class PirepController extends Controller
+      */
+     public function route_delete(string $id, Request $request): JsonResponse
+     {
+-        $pirep = Pirep::find($id);
+-
+-        Acars::where([
+-            'pirep_id' => $id,
+-            'type'     => AcarsType::ROUTE,
+-        ])->delete();
++        return $this->pirepSvc->withLockedPirep($id, function (Pirep $pirep) use ($id): JsonResponse {
++            $this->checkCancelled($pirep);
++            Acars::where(['pirep_id' => $id, 'type' => AcarsType::ROUTE])->delete();
+ 
+-        return $this->message('Route deleted');
++            return $this->message('Route deleted');
++        });
+     }
+ }
+diff --git a/app/Listeners/DiversionHandler.php b/app/Listeners/DiversionHandler.php
+index f8c29651d98ecf8d9b3008b6c01f49e4accfc6c7..f46b42cb4bfdff0840c3724f063e10ba8d34e397 100644
+--- a/app/Listeners/DiversionHandler.php
++++ b/app/Listeners/DiversionHandler.php
+@@ -29,7 +29,7 @@ class DiversionHandler extends Listener // implements ShouldQueue
+      */
+     public function onPirepFiled(PirepFiled $event): void
+     {
+-        $this->pirepSvc->handleDiversion($event->pirep);
++        $this->pirepSvc->handleDiversion($event->pirep, $event->underFilingLock);
+     }
+ 
+     /**
+diff --git a/app/Notifications/NotificationEventsHandler.php b/app/Notifications/NotificationEventsHandler.php
+index 8f1856d5e8da9b3711f312b7fe3e4c61c3ba6597..9651dd7ea54aa64ae4875b0315328408cac0b758 100644
+--- a/app/Notifications/NotificationEventsHandler.php
++++ b/app/Notifications/NotificationEventsHandler.php
+@@ -18,6 +18,7 @@ use App\Models\Enums\UserState;
+ use App\Models\User;
+ use App\Notifications\Messages\UserRejected;
+ use App\Notifications\Notifiables\Broadcast;
++use App\Services\PirepAfterCommit;
+ use Exception;
+ use Illuminate\Auth\Events\Verified;
+ use Illuminate\Support\Collection;
+@@ -144,17 +145,21 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onUserStateChange(UserStateChanged $event): void
+     {
+-        Log::info('NotificationEvents::onUserStateChange: New user state='.$event->user->state);
+-
+-        if ($event->old_state === UserState::PENDING) {
+-            if ($event->user->state === UserState::ACTIVE) {
+-                $this->notifyUser($event->user, new Messages\UserRegistered($event->user));
+-            } elseif ($event->user->state === UserState::REJECTED) {
+-                $this->notifyUser($event->user, new UserRejected($event->user));
++        $snapshot = clone $event;
++        $snapshot->user = $event->user->withoutRelations();
++        PirepAfterCommit::notify($event->user, 'user_state', function () use ($snapshot): void {
++            Log::info('NotificationEvents::onUserStateChange: New user state='.$snapshot->user->state);
++
++            if ($snapshot->old_state === UserState::PENDING) {
++                if ($snapshot->user->state === UserState::ACTIVE) {
++                    $this->notifyUser($snapshot->user, new Messages\UserRegistered($snapshot->user));
++                } elseif ($snapshot->user->state === UserState::REJECTED) {
++                    $this->notifyUser($snapshot->user, new UserRejected($snapshot->user));
++                }
++            } elseif ($snapshot->old_state === UserState::ACTIVE) {
++                Log::info('User state change from active to ??');
+             }
+-        } elseif ($event->old_state === UserState::ACTIVE) {
+-            Log::info('User state change from active to ??');
+-        }
++        });
+     }
+ 
+     /**
+@@ -177,23 +182,27 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepStatusChange(PirepStatusChange $event): void
+     {
+-        Log::info('NotificationEvents::onPirepStatusChange: '.$event->pirep->id.' status changed');
+-
+-        $message_types = [
+-            PirepStatus::BOARDING,
+-            PirepStatus::PUSHBACK_TOW,
+-            PirepStatus::GRND_RTRN,
+-            PirepStatus::TAKEOFF,
+-            PirepStatus::LANDED,
+-            PirepStatus::DIVERTED,
+-            PirepStatus::CANCELLED,
+-            PirepStatus::PAUSED,
+-            PirepStatus::EMERG_DESCENT,
+-        ];
+-
+-        if (setting('notifications.discord_pirep_status', true) && in_array($event->pirep->status, $message_types, true)) {
+-            Notification::send([$event->pirep], new Messages\Broadcast\PirepStatusChanged($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_status', function () use ($snapshot): void {
++            Log::info('NotificationEvents::onPirepStatusChange: '.$snapshot->pirep->id.' status changed');
++
++            $message_types = [
++                PirepStatus::BOARDING,
++                PirepStatus::PUSHBACK_TOW,
++                PirepStatus::GRND_RTRN,
++                PirepStatus::TAKEOFF,
++                PirepStatus::LANDED,
++                PirepStatus::DIVERTED,
++                PirepStatus::CANCELLED,
++                PirepStatus::PAUSED,
++                PirepStatus::EMERG_DESCENT,
++            ];
++
++            if (setting('notifications.discord_pirep_status', true) && in_array($snapshot->pirep->status, $message_types, true)) {
++                Notification::send([$snapshot->pirep], new Messages\Broadcast\PirepStatusChanged($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -201,17 +210,21 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepFile(PirepFiled $event): void
+     {
+-        Log::info('NotificationEvents::onPirepFile: '.$event->pirep->id.' filed');
+-        if (setting('notifications.mail_pirep_admin', true)) {
+-            $this->notifyAdmins(new Messages\PirepFiled($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_filed', function () use ($snapshot): void {
++            Log::info('NotificationEvents::onPirepFile: '.$snapshot->pirep->id.' filed');
++            if (setting('notifications.mail_pirep_admin', true)) {
++                $this->notifyAdmins(new Messages\PirepFiled($snapshot->pirep));
++            }
+ 
+-        /*
+-         * Broadcast notifications
+-         */
+-        if (setting('notifications.discord_pirep_filed', true)) {
+-            Notification::send([$event->pirep], new Messages\Broadcast\PirepFiled($event->pirep));
+-        }
++            /*
++             * Broadcast notifications
++             */
++            if (setting('notifications.discord_pirep_filed', true)) {
++                Notification::send([$snapshot->pirep], new Messages\Broadcast\PirepFiled($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -219,10 +232,14 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepAccepted(PirepAccepted $event): void
+     {
+-        if (setting('notifications.mail_pirep_user_ack', true)) {
+-            Log::info('NotificationEvents::onPirepAccepted: '.$event->pirep->id.' accepted');
+-            $this->notifyUser($event->pirep->user, new Messages\PirepAccepted($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_accepted', function () use ($snapshot): void {
++            if (setting('notifications.mail_pirep_user_ack', true)) {
++                Log::info('NotificationEvents::onPirepAccepted: '.$snapshot->pirep->id.' accepted');
++                $this->notifyUser($snapshot->pirep->user, new Messages\PirepAccepted($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -230,10 +247,14 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onPirepRejected(PirepRejected $event): void
+     {
+-        if (setting('notifications.mail_pirep_user_rej', true)) {
+-            Log::info('NotificationEvents::onPirepRejected: '.$event->pirep->id.' rejected');
+-            $this->notifyUser($event->pirep->user, new Messages\PirepRejected($event->pirep));
+-        }
++        $snapshot = clone $event;
++        $snapshot->pirep = $event->pirep->withoutRelations();
++        PirepAfterCommit::notify($event->pirep, 'pirep_rejected', function () use ($snapshot): void {
++            if (setting('notifications.mail_pirep_user_rej', true)) {
++                Log::info('NotificationEvents::onPirepRejected: '.$snapshot->pirep->id.' rejected');
++                $this->notifyUser($snapshot->pirep->user, new Messages\PirepRejected($snapshot->pirep));
++            }
++        });
+     }
+ 
+     /**
+@@ -273,12 +294,16 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onAwardAwarded(AwardAwarded $event): void
+     {
+-        /*
+-         * Broadcast notifications
+-         */
+-        if (setting('notifications.discord_award_awarded', true)) {
+-            Notification::send([$event->userAward], new Messages\Broadcast\AwardAwarded($event->userAward));
+-        }
++        $snapshot = clone $event;
++        $snapshot->userAward = $event->userAward->withoutRelations();
++        PirepAfterCommit::notify($event->userAward, 'award_awarded', function () use ($snapshot): void {
++            /*
++             * Broadcast notifications
++             */
++            if (setting('notifications.discord_award_awarded', true)) {
++                Notification::send([$snapshot->userAward], new Messages\Broadcast\AwardAwarded($snapshot->userAward));
++            }
++        });
+     }
+ 
+     /**
+@@ -286,11 +311,15 @@ class NotificationEventsHandler extends Listener
+      */
+     public function onUserStatsChanged(UserStatsChanged $event): void
+     {
+-        /*
+-         * Broadcast notifications
+-         */
+-        if (setting('notifications.discord_user_rank_changed', true) && $event->stat_name === 'rank') {
+-            Notification::send([$event->user], new Messages\Broadcast\UserRankChanged($event->user));
+-        }
++        $snapshot = clone $event;
++        $snapshot->user = $event->user->withoutRelations();
++        PirepAfterCommit::notify($event->user, 'user_stats', function () use ($snapshot): void {
++            /*
++             * Broadcast notifications
++             */
++            if (setting('notifications.discord_user_rank_changed', true) && $snapshot->stat_name === 'rank') {
++                Notification::send([$snapshot->user], new Messages\Broadcast\UserRankChanged($snapshot->user));
++            }
++        });
+     }
+ }
+diff --git a/app/Services/AircraftService.php b/app/Services/AircraftService.php
+index 86a431d516b941fe845059d21e384fefa2e1d69f..58e459c482d0123f465cfa76d85ae2d1678f36e9 100644
+--- a/app/Services/AircraftService.php
++++ b/app/Services/AircraftService.php
+@@ -15,13 +15,22 @@ class AircraftService extends Service
+      */
+     public function recalculateStats()
+     {
+-        $allAircraft = Aircraft::where('status', AircraftStatus::ACTIVE)->get(); // TODO: Soft delete
+-        foreach ($allAircraft as $aircraft) {
+-            $pirep_time_total = Pirep::where('aircraft_id', $aircraft->id)
+-                ->where('state', PirepState::ACCEPTED)
+-                ->sum('flight_time');
+-            $aircraft->flight_time = $pirep_time_total;
+-            $aircraft->save();
++        $model = new Aircraft();
++        $connection = $model->getConnection();
++        if ($connection !== (new Pirep())->getConnection() || $connection->transactionLevel() !== 0) {
++            throw new \RuntimeException('Aircraft recount requires its own transaction on the PIREP primary.');
++        }
++
++        foreach ($model->newQuery()->useWritePdo()->where('status', AircraftStatus::ACTIVE)->pluck('id') as $id) {
++            $connection->transaction(static function () use ($model, $id): void {
++                $aircraft = $model->newQuery()->whereKey($id)->lockForUpdate()->first();
++                if (!$aircraft || $aircraft->status !== AircraftStatus::ACTIVE) {
++                    return;
++                }
++                $aircraft->flight_time = Pirep::where('aircraft_id', $id)
++                    ->where('state', PirepState::ACCEPTED)->sum('flight_time');
++                $aircraft->save();
++            }, 1);
+         }
+     }
+ }
+diff --git a/app/Services/PirepAfterCommit.php b/app/Services/PirepAfterCommit.php
+new file mode 100644
+index 0000000000000000000000000000000000000000..23ecdb7b1e2ceb1445f401301f8c6929c17659d2
+--- /dev/null
++++ b/app/Services/PirepAfterCommit.php
+@@ -0,0 +1,32 @@
++<?php
++
++namespace App\Services;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Support\Facades\Log;
++use Throwable;
++
++final class PirepAfterCommit
++{
++    public static function notify(Model $context, string $kind, callable $send): void
++    {
++        $connection = $context->getConnection();
++        if ($connection->transactionLevel() === 0) {
++            $send();
++
++            return;
++        }
++
++        $id = $context->getKey();
++        $connection->afterCommit(static function () use ($kind, $id, $send): void {
++            try {
++                $send();
++            } catch (Throwable $error) {
++                // Never turn a committed accounting operation into a reported failure.
++                Log::warning('Post-commit notification failed', [
++                    'kind' => $kind, 'record_id' => $id, 'exception_type' => get_class($error),
++                ]);
++            }
++        });
++    }
++}
+diff --git a/app/Services/PirepService.php b/app/Services/PirepService.php
+index ae71e302f54051a58678b4ca4f1cca2c5650edbb..2d32ad06b93c7e7836ea519308f360f0d49bca35 100644
+--- a/app/Services/PirepService.php
++++ b/app/Services/PirepService.php
+@@ -40,6 +40,7 @@ use App\Repositories\FlightRepository;
+ use App\Repositories\PirepRepository;
+ use App\Support\Units\Fuel;
+ use Carbon\Carbon;
++use Illuminate\Database\Eloquent\Model;
+ use Illuminate\Database\Eloquent\ModelNotFoundException;
+ use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Facades\Log;
+@@ -48,6 +49,8 @@ use Nwidart\Modules\Facades\Module;
+ 
+ class PirepService extends Service
+ {
++    public const VUSCG_REVIEW_PROTOCOL = 1;
++
+     public function __construct(
+         private readonly AirportRepository $airportRepo,
+         private readonly AirportService $airportSvc,
+@@ -60,6 +63,76 @@ class PirepService extends Service
+         private readonly UserService $userSvc
+     ) {}
+ 
++    /**
++     * Serialize writes using the primary, in the order PIREP -> pilot -> aircraft.
++     * A caller must not acquire either participant lock before calling this method.
++     * Run once: do not replay synchronous listeners on a timeout or deadlock.
++     */
++    public function withLockedPirep(string $id, callable $work, bool $required = true): mixed
++    {
++        $model = new Pirep();
++        $connection = $model->getConnection();
++        if ($connection !== DB::connection()) {
++            throw new \RuntimeException('PIREP and native listeners must share the primary connection.');
++        }
++
++        return $connection->transaction(function () use ($model, $id, $work, $required) {
++            $pirep = $model->newQuery()->whereKey($id)->lockForUpdate()->first();
++            if (!$pirep || (string) $pirep->getKey() !== $id) {
++                if (!$required) {
++                    return $work(null);
++                }
++                throw (new ModelNotFoundException())->setModel(Pirep::class, [$id]);
++            }
++            if (!array_key_exists('vuscg_review_revision', $pirep->getAttributes()) ||
++                !array_key_exists('vuscg_filing_pending', $pirep->getAttributes())) {
++                throw new \RuntimeException('The vUSCG PIREP concurrency schema is required.');
++            }
++
++            return $work($pirep);
++        }, 1);
++    }
++
++    private function lockAccountingModels(Pirep $pirep, bool $requireAircraft = true): array
++    {
++        $pilot = $pirep->user();
++        $aircraft = $pirep->aircraft();
++        foreach ([$pilot, $aircraft] as $relation) {
++            if ($relation->getRelated()->getConnection() !== $pirep->getConnection()) {
++                throw new \RuntimeException('PIREP accounting models must share the primary connection.');
++            }
++        }
++        $lockedPilot = $pilot->lockForUpdate()->firstOrFail();
++        $lockedAircraft = $requireAircraft ? $aircraft->lockForUpdate()->firstOrFail() : $aircraft->lockForUpdate()->first();
++        $pirep->setRelation('user', $lockedPilot)->setRelation('aircraft', $lockedAircraft);
++
++        return [$lockedPilot, $lockedAircraft];
++    }
++
++    public static function reviewRevision(Pirep $pirep): string
++    {
++        return $pirep->getRawOriginal('vuscg_review_revision') ?? 'legacy';
++    }
++
++    public function invalidateReview(Pirep $pirep): void
++    {
++        $pirep->vuscg_review_revision = bin2hex(random_bytes(16));
++    }
++
++    public function assertEditable(Pirep $pirep): void
++    {
++        if ($pirep->state === PirepState::ACCEPTED) {
++            throw new PirepError($pirep, 'Reject the accepted PIREP before editing or deleting its accounting inputs.');
++        }
++    }
++
++    private function withoutReviewFields(array $attrs): array
++    {
++        unset($attrs['state'], $attrs['vuscg_review_revision'], $attrs['vuscg_filing_pending']);
++
++        return $attrs;
++    }
++
+     /**
+      * Create a prefiled PIREP
+      *
+@@ -71,6 +144,7 @@ class PirepService extends Service
+      */
+     public function prefile(User $user, array $attrs, array $fields = [], array $fares = []): Pirep
+     {
++        $attrs = $this->withoutReviewFields($attrs);
+         $attrs['user_id'] = $user->id;
+         $attrs['state'] = PirepState::IN_PROGRESS;
+ 
+@@ -185,6 +259,23 @@ class PirepService extends Service
+      * @param array PirepFieldValue[] $field_values
+      */
+     public function create(Pirep $pirep, array $fields = []): Pirep
++    {
++        if (!$pirep->exists) {
++            return $pirep->getConnection()->transaction(fn () => $this->createUnderLock($pirep, $fields), 1);
++        }
++
++        return $this->withLockedPirep((string) $pirep->getKey(), function (Pirep $locked) use ($pirep, $fields): Pirep {
++            if ($locked->read_only || self::reviewRevision($locked) !== self::reviewRevision($pirep)) {
++                throw new PirepError($locked, 'PIREP changed during editing. Reload it before saving.');
++            }
++            $locked->fill($this->withoutReviewFields($pirep->getDirty()));
++            $this->invalidateReview($locked);
++
++            return $this->createUnderLock($locked, $fields);
++        });
++    }
++
++    private function createUnderLock(Pirep $pirep, array $fields): Pirep
+     {
+         if (empty($fields)) {
+             $fields = [];
+@@ -213,6 +304,9 @@ class PirepService extends Service
+         }
+ 
+         $pirep->status = PirepStatus::ARRIVED;
++        if (!$pirep->exists && $pirep->state === PirepState::PENDING) {
++            $pirep->vuscg_filing_pending = 1;
++        }
+ 
+         // Copy some fields over from Flight/SimBrief if we have it
+         if ($pirep->flight) {
+@@ -223,7 +317,7 @@ class PirepService extends Service
+         $pirep->save();
+         $pirep->refresh();
+ 
+-        $this->updateCustomFields($pirep->id, $fields);
++        $this->saveCustomFieldsUnderLock($pirep->id, $fields);
+ 
+         return $pirep;
+     }
+@@ -235,13 +329,23 @@ class PirepService extends Service
+      * @throws \Prettus\Validator\Exceptions\ValidatorException
+      * @throws \Exception
+      */
+-    public function update(string $pirep_id, array $attrs, array $fields = [], array $fares = []): Pirep
++    public function update(string $pirep_id, array $attrs, array $fields = [], array $fares = [], ?callable $validate = null): Pirep
+     {
+-        $pirep = $this->pirepRepo->update($attrs, $pirep_id);
+-        $this->updateCustomFields($pirep_id, $fields);
+-        $this->fareSvc->saveToPirep($pirep, $fares);
++        return $this->withLockedPirep($pirep_id, function (Pirep $pirep) use ($attrs, $fields, $fares, $validate): Pirep {
++            if ($validate) {
++                $validate($pirep);
++            }
++            if ($pirep->read_only) {
++                throw new PirepError($pirep, 'PIREP is read-only');
++            }
++            $pirep->fill($this->withoutReviewFields($attrs));
++            $this->invalidateReview($pirep);
++            $this->persistLocked($pirep);
++            $this->saveCustomFieldsUnderLock($pirep->id, $fields);
++            $this->fareSvc->saveToPirep($pirep, $fares);
+ 
+-        return $pirep;
++            return $pirep;
++        });
+     }
+ 
+     /**
+@@ -253,6 +357,26 @@ class PirepService extends Service
+      * @throws \Exception
+      */
+     public function file(Pirep $pirep, array $attrs = [], array $fields = [], array $fares = []): Pirep
++    {
++        return $this->withLockedPirep((string) $pirep->getKey(),
++            fn (Pirep $locked) => $this->fileUnderLock($locked, $attrs, $fields, $fares));
++    }
++
++    public function fileAndSubmit(string $id, array $attrs, array $fields, array $fares, callable $validate): Pirep
++    {
++        return $this->withLockedPirep($id, function (Pirep $pirep) use ($attrs, $fields, $fares, $validate): Pirep {
++            $validate($pirep);
++            $pirep = $this->fileUnderLock($pirep, $attrs, $fields, $fares);
++            if (!Acars::where(['pirep_id' => $pirep->id, 'type' => AcarsType::ROUTE])->lockForUpdate()->first(['id'])) {
++                $this->saveRoute($pirep);
++            }
++            $this->submitUnderLock($pirep);
++
++            return $pirep->newQuery()->whereKey($pirep->getKey())->lockForUpdate()->firstOrFail();
++        });
++    }
++
++    private function fileUnderLock(Pirep $pirep, array $attrs, array $fields, array $fares): Pirep
+     {
+         if (empty($fields)) {
+             $fields = [];
+@@ -266,16 +390,21 @@ class PirepService extends Service
+             PirepState::REJECTED,
+         ], true);
+ 
+-        if ($is_already_submitted) {
++        if ($is_already_submitted || $pirep->state === PirepState::DELETED) {
+             throw new PirepError($pirep, 'PIREP has already been submitted');
+         }
+ 
++        $attrs = $this->withoutReviewFields($attrs);
++        $attrs['user_id'] = $pirep->user_id;
+         $attrs['state'] = PirepState::PENDING;
+         $attrs['status'] = PirepStatus::ARRIVED;
+         $attrs['submitted_at'] = Carbon::now('UTC');
+ 
+-        $this->pirepRepo->update($attrs, $pirep->id);
+-        $pirep->refresh();
++        $pirep->fill($attrs);
++        $this->lockAccountingModels($pirep, requireAircraft: false);
++        $pirep->vuscg_filing_pending = 1;
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+         // Check if there is a simbrief_id, change it to be set to the PIREP
+         // at the end of the flight when it's been filed
+@@ -309,10 +438,10 @@ class PirepService extends Service
+             $pirep->planned_flight_time = $pirep->flight->flight_time;
+         }
+ 
+-        $pirep->save();
++        $this->persistLocked($pirep);
+         $pirep->refresh();
+ 
+-        $this->updateCustomFields($pirep->id, $fields);
++        $this->saveCustomFieldsUnderLock($pirep->id, $fields);
+         $this->fareSvc->saveToPirep($pirep, $fares);
+ 
+         return $pirep;
+@@ -425,6 +554,18 @@ class PirepService extends Service
+      */
+     public function submit(Pirep $pirep)
+     {
++        $this->withLockedPirep((string) $pirep->getKey(), fn (Pirep $locked) => $this->submitUnderLock($locked));
++    }
++
++    private function submitUnderLock(Pirep $pirep): void
++    {
++        if (!in_array($pirep->state, [PirepState::DRAFT, PirepState::IN_PROGRESS], true) &&
++            ($pirep->state !== PirepState::PENDING || !$pirep->vuscg_filing_pending)) {
++            return;
++        }
++
++        [$pilot, $aircraft] = $this->lockAccountingModels($pirep, requireAircraft: false);
++        $aircraftId = $pirep->aircraft_id;
+         // Check if there is a simbrief_id, change it to be set to the PIREP
+         // at the end of the flight when it's been submitted finally.
+         // Prefile, Save (as draft) and File already have this but the Submit button
+@@ -438,37 +579,39 @@ class PirepService extends Service
+             }
+         }
+ 
+-        Log::info('New PIREP filed, pirep_id: '.$pirep->id);
+-        event(new PirepFiled($pirep));
++        // The auto-rejection listener must run before the rank auto-approval check.
++        $pirep->state = PirepState::PENDING;
++        $pirep->vuscg_filing_pending = 0;
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+-        $pirep->refresh();
++        Log::info('New PIREP filed, pirep_id: '.$pirep->id);
++        event(new PirepFiled($pirep, underFilingLock: true));
++
++        // Locking reads remain current even if an enclosing transaction already has a read snapshot.
++        $pirep = $pirep->newQuery()->whereKey($pirep->getKey())->lockForUpdate()->firstOrFail();
++        if ((string) $pirep->user_id !== (string) $pilot->getKey() ||
++            (string) $pirep->aircraft_id !== (string) $aircraftId ||
++            !in_array($pirep->state, [PirepState::PENDING, PirepState::REJECTED], true)) {
++            throw new \RuntimeException('Unexpected native PirepFiled identity or state change.');
++        }
++        // Reload the locked rows after synchronous listeners, including diversion updates.
++        $pirep->setRelation('user', $pilot->newQuery()->whereKey($pilot->getKey())->lockForUpdate()->firstOrFail());
++        $pirep->setRelation('aircraft', $aircraft ? $aircraft->newQuery()->whereKey($aircraft->getKey())->lockForUpdate()->firstOrFail() : null);
++        if ($pirep->state === PirepState::REJECTED) {
++            event(new PirepRejected($pirep));
+ 
+-        // Figure out what pirep state should be, if nothing provided yet.
+-        if ($pirep->state != PirepState::ACCEPTED && $pirep->state != PirepState::REJECTED) {
+-            $default_state = PirepState::PENDING;
+-        } else {
+-            $default_state = $pirep->state;
++            return;
+         }
+ 
+-        // If pirep is still at PENDING or DRAFT state decide the default behavior by looking at rank settings
+-        if ($pirep->state === PirepState::PENDING || $pirep->state === PirepState::DRAFT) {
+-            if ($pirep->source === PirepSource::ACARS && $pirep->user->rank->auto_approve_acars) {
+-                $default_state = PirepState::ACCEPTED;
+-            } elseif ($pirep->source === PirepSource::MANUAL && $pirep->user->rank->auto_approve_manual) {
+-                $default_state = PirepState::ACCEPTED;
++        $rank = $pirep->user->rank;
++        if (($pirep->source === PirepSource::ACARS && $rank?->auto_approve_acars) ||
++            ($pirep->source === PirepSource::MANUAL && $rank?->auto_approve_manual)) {
++            if (!$aircraft) {
++                throw new PirepError($pirep, 'A valid aircraft is required for flight credit.');
+             }
++            $this->acceptUnderLock($pirep);
+         }
+-
+-        // only update the pilot last state if they are accepted
+-        if ($default_state === PirepState::ACCEPTED) {
+-            $pirep = $this->accept($pirep);
+-        } elseif ($default_state === PirepState::REJECTED) {
+-            $pirep = $this->reject($pirep);
+-        } else {
+-            $pirep->state = $default_state;
+-        }
+-
+-        $pirep->save();
+     }
+ 
+     /**
+@@ -478,6 +621,11 @@ class PirepService extends Service
+      * @throws \Prettus\Validator\Exceptions\ValidatorException
+      */
+     public function cancel(Pirep $pirep): Pirep
++    {
++        return $this->withLockedPirep((string) $pirep->getKey(), fn (Pirep $locked) => $this->cancelUnderLock($locked));
++    }
++
++    private function cancelUnderLock(Pirep $pirep): Pirep
+     {
+         if (in_array($pirep->state, Pirep::$cancel_states, true)) {
+             Log::info('PIREP '.$pirep->id.' can\'t be cancelled, state='.$pirep->state);
+@@ -485,11 +633,12 @@ class PirepService extends Service
+             throw new PirepCancelNotAllowed($pirep);
+         }
+ 
+-        $pirep = $this->pirepRepo->update([
+-            'state'  => PirepState::CANCELLED,
+-            'status' => PirepStatus::CANCELLED,
+-        ], $pirep->id);
++        $pirep->state = PirepState::CANCELLED;
++        $pirep->status = PirepStatus::CANCELLED;
+ 
++        $pirep->vuscg_filing_pending = 0;
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+         event(new PirepCancelled($pirep));
+ 
+         return $pirep;
+@@ -508,6 +657,30 @@ class PirepService extends Service
+      */
+     public function delete(Pirep $pirep): void
+     {
++        $this->deleteIfCurrent($pirep);
++    }
++
++    public function deleteIfCurrent(Pirep $pirep, ?callable $eligible = null): bool
++    {
++        return $this->withLockedPirep((string) $pirep->getKey(), function (?Pirep $locked) use ($pirep, $eligible): bool {
++            if (!$locked || self::reviewRevision($pirep) !== self::reviewRevision($locked) ||
++                $locked->state !== (int) $pirep->getRawOriginal('state') || ($eligible && !$eligible($locked))) {
++                return false;
++            }
++            $this->assertEditable($locked);
++            $this->deleteUnderLock($locked);
++
++            return true;
++        }, false);
++    }
++
++    private function deleteUnderLock(Pirep $pirep): void
++    {
++        $pilot = $pirep->user();
++        if ($pilot->getRelated()->getConnection() !== $pirep->getConnection()) {
++            throw new \RuntimeException('PIREP and pilot must share the primary connection.');
++        }
++        $user = $pilot->lockForUpdate()->firstOrFail();
+         $user_id = $pirep->user_id;
+ 
+         $w = ['pirep_id' => $pirep->id];
+@@ -522,7 +695,6 @@ class PirepService extends Service
+             ->latest('submitted_at')
+             ->first();
+ 
+-        $user = User::find($user_id);
+         $user->last_pirep_id = !empty($last_pirep) ? $last_pirep->id : null;
+         $user->save();
+     }
+@@ -533,6 +705,16 @@ class PirepService extends Service
+      * @param PirepFieldValue[] $field_values
+      */
+     public function updateCustomFields(string $pirep_id, array $field_values): void
++    {
++        $this->withLockedPirep($pirep_id, function (Pirep $pirep) use ($field_values): void {
++            $this->assertEditable($pirep);
++            $this->saveCustomFieldsUnderLock($pirep->id, $field_values);
++            $this->invalidateReview($pirep);
++            $pirep->save();
++        });
++    }
++
++    private function saveCustomFieldsUnderLock(string $pirep_id, array $field_values): void
+     {
+         if (!$field_values || empty($field_values)) {
+             return;
+@@ -551,70 +733,56 @@ class PirepService extends Service
+      */
+     public function changeState(Pirep $pirep, int $new_state): Pirep
+     {
+-        Log::info('PIREP '.$pirep->id.' state change from '.$pirep->state.' to '.$new_state);
+-
+-        if ($pirep->state === $new_state) {
+-            return $pirep;
++        [$report] = $this->review((string) $pirep->getKey(), $new_state, self::reviewRevision($pirep));
++        if (!$report) {
++            throw (new ModelNotFoundException())->setModel(Pirep::class, [$pirep->getKey()]);
+         }
+ 
+-        /*
+-         * Move from a PENDING status into either ACCEPTED or REJECTED
+-         */
+-        if ($pirep->state === PirepState::PENDING) {
+-            if ($new_state === PirepState::ACCEPTED) {
+-                return $this->accept($pirep);
+-            }
++        return $report;
++    }
+ 
+-            if ($new_state === PirepState::REJECTED) {
+-                return $this->reject($pirep);
++    /**
++     * A missing revision permits pending review only, never an administrative reversal.
++     * Return the authoritative report and whether this request performed accounting.
++     *
++     * @return array{?Pirep, bool}
++     */
++    public function review(string $id, int $target, ?string $revision = null): array
++    {
++        return $this->withLockedPirep($id, function (?Pirep $locked) use ($target, $revision): array {
++            if ($locked === null || $locked->state === $target || $locked->vuscg_filing_pending ||
++                !in_array($target, [PirepState::ACCEPTED, PirepState::REJECTED], true) ||
++                !in_array($locked->state, [PirepState::PENDING, PirepState::ACCEPTED, PirepState::REJECTED], true) ||
++                ($revision === null ? $locked->state !== PirepState::PENDING : self::reviewRevision($locked) !== $revision)) {
++                return [$locked, false];
+             }
+ 
+-            return $pirep;
+-        }
+-
+-        /*
+-         * Move from a ACCEPTED to REJECTED status
+-         */
+-        if ($pirep->state === PirepState::ACCEPTED) {
+-            $pirep = $this->reject($pirep);
+-
+-            return $pirep;
+-        }
+-
+-        /*
+-         * Move from REJECTED to ACCEPTED
+-         */
+-        if ($pirep->state === PirepState::REJECTED) {
+-            $pirep = $this->accept($pirep);
+-
+-            return $pirep;
+-        }
++            $this->lockAccountingModels($locked,
++                requireAircraft: $target === PirepState::ACCEPTED || $locked->state === PirepState::ACCEPTED);
+ 
+-        return $pirep->refresh();
++            return [$target === PirepState::ACCEPTED
++                ? $this->acceptUnderLock($locked) : $this->rejectUnderLock($locked), true];
++        }, false);
+     }
+ 
+-    /**
+-     * @throws \Exception
+-     */
+     public function accept(Pirep $pirep): Pirep
+     {
+-        // moving from a REJECTED state to ACCEPTED, reconcile statuses
+-        if ($pirep->state === PirepState::ACCEPTED) {
+-            return $pirep;
+-        }
++        return $this->changeState($pirep, PirepState::ACCEPTED);
++    }
+ 
++    private function acceptUnderLock(Pirep $pirep): Pirep
++    {
+         $ft = $pirep->flight_time;
+         $pilot = $pirep->user;
+ 
+-        $this->userSvc->adjustFlightTime($pilot, $ft);
+-        $this->userSvc->adjustFlightCount($pilot, +1);
+-        $this->userSvc->calculatePilotRank($pilot);
+-        $pirep->user->refresh();
++        $this->userSvc->adjustFlightTime($pilot, $ft, refresh: false);
++        $this->userSvc->adjustFlightCount($pilot, +1, refresh: false);
++        $this->userSvc->calculatePilotRank($pilot, refresh: false);
+ 
+         // Change the status
+         $pirep->state = PirepState::ACCEPTED;
+-        $pirep->save();
+-        $pirep->refresh();
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+         Log::info('PIREP '.$pirep->id.' state change to ACCEPTED');
+ 
+@@ -626,11 +794,9 @@ class PirepService extends Service
+         $pirep->aircraft->airport_id = $pirep->arr_airport_id;
+         $pirep->aircraft->landing_time = $pirep->updated_at;
+         $pirep->aircraft->fuel_onboard = $fuel_on_board;
+-        $pirep->aircraft->save();
+-
+-        $pirep->refresh();
++        $this->persistLocked($pirep->aircraft);
+ 
+-        $this->setPilotState($pilot, $pirep);
++        $this->setPilotStateUnderLock($pilot, $pirep);
+         event(new PirepAccepted($pirep));
+         event(new ProcessAward($pirep->user));
+ 
+@@ -638,6 +804,11 @@ class PirepService extends Service
+     }
+ 
+     public function reject(Pirep $pirep): Pirep
++    {
++        return $this->changeState($pirep, PirepState::REJECTED);
++    }
++
++    private function rejectUnderLock(Pirep $pirep): Pirep
+     {
+         // If this was previously ACCEPTED, then reconcile the flight hours
+         // that have already been counted, etc
+@@ -645,19 +816,18 @@ class PirepService extends Service
+             $user = $pirep->user;
+             $ft = $pirep->flight_time * -1;
+ 
+-            $this->userSvc->adjustFlightTime($user, $ft);
+-            $this->userSvc->adjustFlightCount($user, -1);
+-            $this->userSvc->calculatePilotRank($user);
+-            $pirep->user->refresh();
++            $this->userSvc->adjustFlightTime($user, $ft, refresh: false);
++            $this->userSvc->adjustFlightCount($user, -1, refresh: false);
++            $this->userSvc->calculatePilotRank($user, refresh: false);
+ 
+             $pirep->aircraft->flight_time -= $pirep->flight_time;
+-            $pirep->aircraft->save();
++            $this->persistLocked($pirep->aircraft);
+         }
+ 
+         // Change the status
+         $pirep->state = PirepState::REJECTED;
+-        $pirep->save();
+-        $pirep->refresh();
++        $this->invalidateReview($pirep);
++        $this->persistLocked($pirep);
+ 
+         Log::info('PIREP '.$pirep->id.' state change to REJECTED');
+ 
+@@ -668,19 +838,51 @@ class PirepService extends Service
+ 
+     public function setPilotState(User $pilot, Pirep $pirep)
+     {
+-        $pilot->refresh();
++        $this->withLockedPirep((string) $pirep->getKey(), function (Pirep $locked) use ($pilot): void {
++            [$current] = $this->lockAccountingModels($locked);
++            if ($current->getKey() !== $pilot->getKey() || $locked->state !== PirepState::ACCEPTED) {
++                throw new PirepError($locked, 'Pilot position requires the current accepted PIREP and pilot.');
++            }
++            $this->setPilotStateUnderLock($current, $locked);
++        });
++    }
+ 
++    private function setPilotStateUnderLock(User $pilot, Pirep $pirep): void
++    {
+         $previous_airport = $pilot->curr_airport_id;
+         $pilot->curr_airport_id = $pirep->arr_airport_id;
+         $pilot->last_pirep_id = $pirep->id;
+-        $pilot->save();
+-
+-        $pirep->refresh();
++        $this->persistLocked($pilot);
+ 
+         event(new UserStatsChanged($pilot, 'airport', $previous_airport));
+     }
+ 
+-    public function handleDiversion(Pirep $pirep): void
++    private function persistLocked(Model $model): void
++    {
++        if (!$model->save()) {
++            throw new \RuntimeException('A native model declined a PIREP write.');
++        }
++    }
++
++    public function handleDiversion(Pirep $pirep, bool $underFilingLock = false): void
++    {
++        if ($underFilingLock) {
++            if ($pirep->getConnection()->transactionLevel() === 0) {
++                throw new \RuntimeException('PIREP diversion requires the filing transaction.');
++            }
++            $this->handleDiversionUnderLock($pirep);
++
++            return;
++        }
++
++        $this->withLockedPirep((string) $pirep->getKey(), function (Pirep $locked): void {
++            $this->assertEditable($locked);
++            $this->lockAccountingModels($locked);
++            $this->handleDiversionUnderLock($locked);
++        });
++    }
++
++    private function handleDiversionUnderLock(Pirep $pirep): void
+     {
+         // Return if diversion handling is disabled
+         if (!setting('pireps.handle_diversion', false)) {
+@@ -761,7 +963,9 @@ class PirepService extends Service
+         }
+ 
+         if (setting('notifications.discord_pirep_diverted', false)) {
+-            Notification::send([$pirep], new PirepDiverted($pirep));
++            $snapshot = $pirep->withoutRelations();
++            PirepAfterCommit::notify($pirep, 'pirep_diverted',
++                static fn () => Notification::send([$snapshot], new PirepDiverted($snapshot)));
+         }
+ 
+         // Update aircraft position
+@@ -771,13 +975,15 @@ class PirepService extends Service
+         $user->update(['curr_airport_id' => $diversion_airport->id]);
+ 
+         // Update pirep details
+-        $pirep->update([
++        $this->invalidateReview($pirep);
++        $pirep->fill([
+             'notes'          => 'DIVERTED FROM '.$pirep->arr_airport_id.' TO '.$diversion_airport->id.' '.$pirep->notes,
+             'alt_airport_id' => $pirep->arr_airport_id, // Save intended dest as alternate for fixing it back when needed
+             'arr_airport_id' => $diversion_airport->id, // Use diversion dest as the new arrival
+             'flight_id'      => null, // Remove the flight id to drop the relationship
+             'route_leg'      => null, // Remove the route_leg to exclude this pirep from tour checks
+         ]);
++        $this->persistLocked($pirep);
+ 
+         Log::info('Pirep '.$pirep->id.' Flight '.$pirep->ident.' DIVERTED to '.$diversion_airport->id.', assets MOVED to Diversion Airport');
+     }
+diff --git a/app/Services/UserService.php b/app/Services/UserService.php
+index d86e1fa8ccdc82015fa9eb8d3459ca4fae5ce493..57a2a5d6eb0982fa8606992b3aa76f00d616d1f0 100644
+--- a/app/Services/UserService.php
++++ b/app/Services/UserService.php
+@@ -387,12 +387,16 @@ class UserService extends Service
+      * Adjust the number of flights a user has. Triggers
+      * UserStatsChanged event
+      */
+-    public function adjustFlightCount(User $user, int $count): User
++    public function adjustFlightCount(User $user, int $count, bool $refresh = true): User
+     {
+-        $user->refresh();
++        if ($refresh) {
++            $user->refresh();
++        }
+         $old_value = $user->flights;
+         $user->flights += $count;
+-        $user->save();
++        if (!$user->save()) {
++            throw new \RuntimeException('Native pilot counter update was declined.');
++        }
+ 
+         event(new UserStatsChanged($user, 'flights', $old_value));
+ 
+@@ -402,11 +406,15 @@ class UserService extends Service
+     /**
+      * Update a user's flight times
+      */
+-    public function adjustFlightTime(User $user, int $minutes): User
++    public function adjustFlightTime(User $user, int $minutes, bool $refresh = true): User
+     {
+-        $user->refresh();
++        if ($refresh) {
++            $user->refresh();
++        }
+         $user->flight_time += $minutes;
+-        $user->save();
++        if (!$user->save()) {
++            throw new \RuntimeException('Native pilot counter update was declined.');
++        }
+ 
+         return $user;
+     }
+@@ -414,9 +422,11 @@ class UserService extends Service
+     /**
+      * See if a pilot's rank has change. Triggers the UserStatsChanged event
+      */
+-    public function calculatePilotRank(User $user): User
++    public function calculatePilotRank(User $user, bool $refresh = true): User
+     {
+-        $user->refresh();
++        if ($refresh) {
++            $user->refresh();
++        }
+ 
+         // If their current rank is one they were assigned, then
+         // don't change away from it automatically.
+@@ -454,7 +464,9 @@ class UserService extends Service
+ 
+         // Only trigger the event/update if there's been a change
+         if ($user->rank_id !== $original_rank_id) {
+-            $user->save();
++            if (!$user->save()) {
++                throw new \RuntimeException('Native pilot rank update was declined.');
++            }
+             $user->refresh();
+             event(new UserStatsChanged($user, 'rank', $old_rank));
+         }
+@@ -499,28 +511,24 @@ class UserService extends Service
+      */
+     public function recalculateStats(User $user): User
+     {
+-        // Recalc their hours
+-        $w = [
+-            'user_id' => $user->id,
+-            'state'   => PirepState::ACCEPTED,
+-        ];
+-
+-        $pirep_count = Pirep::where($w)->count();
+-        $user->flights = $pirep_count;
+-
+-        $flight_time = Pirep::where($w)->sum('flight_time');
+-        $user->flight_time = $flight_time;
+-
+-        $user->save();
+-
+-        // Recalc the rank
+-        $this->calculatePilotRank($user);
+-
+-        Log::info('User '.$user->ident.' updated; pirep count='.$pirep_count.', rank='.$user->rank->name.', flight_time='.$user->flight_time.' minutes');
++        $connection = $user->getConnection();
++        if ($connection !== (new Pirep())->getConnection() || $connection->transactionLevel() !== 0) {
++            throw new \RuntimeException('Pilot recount requires its own transaction on the PIREP primary.');
++        }
+ 
+-        $user->save();
++        return $connection->transaction(function () use ($user): User {
++            $user = $user->newQuery()->whereKey($user->getKey())->lockForUpdate()->firstOrFail();
++            // First consistent read after acquiring the same pilot lock as a review.
++            $totals = Pirep::where(['user_id' => $user->id, 'state' => PirepState::ACCEPTED])
++                ->selectRaw('COUNT(*) AS flights, COALESCE(SUM(flight_time), 0) AS minutes')->toBase()->first();
++            $user->flights = (int) $totals->flights;
++            $user->flight_time = (int) $totals->minutes;
++            $user->save();
++            $this->calculatePilotRank($user, refresh: false);
++            Log::info('User '.$user->ident.' updated; pirep count='.$user->flights.', rank='.$user->rank->name.', flight_time='.$user->flight_time.' minutes');
+ 
+-        return $user;
++            return $user;
++        }, 1);
+     }
+ 
+     /**
+diff --git a/modules/DisposableBasic/Listeners/Gen_AutoReject.php b/modules/DisposableBasic/Listeners/Gen_AutoReject.php
+index 2bbb8ee2c2b09c53ec83c9644831cefe3caebb8b..5e2e9290fb7d602590d88648329ef0c02ec79529 100644
+--- a/modules/DisposableBasic/Listeners/Gen_AutoReject.php
++++ b/modules/DisposableBasic/Listeners/Gen_AutoReject.php
+@@ -14,6 +14,13 @@ class Gen_AutoReject
+ {
+     public function handle(PirepFiled $event)
+     {
++        $pirep = $event->pirep;
++        $connection = $pirep->getConnection();
++        if (!$event->underFilingLock || $connection->transactionLevel() === 0 || $pirep->state !== PirepState::PENDING) {
++            // This listener may only write during the synchronous, locked submission.
++            return;
++        }
++
+         $auto_reject = DB_Setting('dbasic.autoreject', false);
+ 
+         $margin_score = DB_Setting('dbasic.ar_marginscore', 0);
+@@ -46,7 +53,6 @@ class Gen_AutoReject
+         }
+ 
+         // Get the pirep and aircraft
+-        $pirep = $event->pirep;
+         $aircraft = $pirep->aircraft;
+ 
+         $pirep_comments = [];
+@@ -55,7 +61,7 @@ class Gen_AutoReject
+ 
+         // Reduce Fuel Burn margin for piston powered aircraft (12566 pounds is 5700 kg // ICAO definition max takeoff weight for small aircraft)
+         $piston_powered = Aircraft::where('mtow', '<', 12566)->groupBy('icao')->pluck('icao')->toArray();
+-        if (in_array(strtoupper($aircraft->icao), $piston_powered)) {
++        if ($aircraft && in_array(strtoupper($aircraft->icao), $piston_powered)) {
+             Log::info('Disposable Basic | Reducing Fuel Consumption Margin For Pirep:'.$pirep->id.' Reported Aircraft ICAO:'.$aircraft->icao);
+             $margin_fburn = round($margin_fburn / 10, 0);
+         }
+@@ -188,13 +194,15 @@ class Gen_AutoReject
+ 
+         // Write Comments
+         if (is_countable($pirep_comments) && count($pirep_comments) > 0) {
+-            DB::table('pirep_comments')->insert($pirep_comments);
++            $connection->table('pirep_comments')->insert($pirep_comments);
+         }
+ 
+         // Write Pirep State (REJECT ONLY)
+         if (isset($pirep_state)) {
+             $pirep->state = $pirep_state;
+-            $pirep->save();
++            if (!$pirep->save()) {
++                throw new \RuntimeException('DisposableBasic PIREP rejection was declined.');
++            }
+         }
+     }
+ }
+
+
+===== integrations/phpvms7/pirep-concurrency/installed-source.sha256 =====
+d3713ffa125d5028178a61aac1713142decbbf8221247aebb8d4c631d3625c3f  app/Cron/Hourly/DeletePireps.php
+098f231b6cfc2a30a4dba1bba340f7395942f66b8c9be547a8f417679fd9ffb9  app/Events/PirepFiled.php
+4c1da3d1794cb6f84a15d981008855d236c7d2980713ea8aa4adb7f914260787  app/Http/Controllers/Admin/PirepController.php
+70b8594662118c36737fc30ce272c7de3f86e833c73ce26173d4bcc56a84a0ca  app/Http/Controllers/Api/PirepController.php
+9b21b104c23776a91c5ff429f2cb6b0da15832365aed169bd5f43fb2ae8ed07f  app/Listeners/DiversionHandler.php
+f3bc8720537d0c3614ec766f717a39305287bb51ef2c20a93723ce7249f09acb  app/Notifications/NotificationEventsHandler.php
+8f0ec7b4fc23a6b8cc32892304dda52553135cc08480fee7779cad40c5f397f6  app/Services/AircraftService.php
+a8b54d88f79194d7cf182fcc1f689f917f760bc206ba20997dae328c3a132acc  app/Services/PirepService.php
+140d8f8113982dddad1890500a1cfb462d08482e59a49d24dd56fd7a56005d6e  app/Services/UserService.php
+93244439374f5e2f96f4b3fa6ae31dfc40e244f2af89394606961e9982d2cbba  modules/DisposableBasic/Listeners/Gen_AutoReject.php
+
+
+===== integrations/phpvms7/pirep-concurrency/schema.sql =====
+-- Staging only. Apply once to the verified InnoDB PIREP schema before the PHP patch.
+ALTER TABLE pireps
+  ADD COLUMN vuscg_review_revision CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  ADD COLUMN vuscg_filing_pending TINYINT UNSIGNED NOT NULL DEFAULT 0;
+
+
+===== integrations/phpvms7/tests/pirep-concurrency/ConcurrencyFixture.php =====
+<?php
+// Runs the patched installed sources with real Illuminate transactions and independent MySQL sessions.
+require getenv('PIREP_FIXTURE_AUTOLOAD');
+require __DIR__.'/FixtureModels.php';
+
+use App\Events\PirepAccepted;
+use App\Events\PirepFiled;
+use App\Events\PirepRejected;
+use App\Events\ProcessAward;
+use App\Listeners\AwardHandler;
+use App\Listeners\FinanceEventHandler;
+use App\Models\Aircraft;
+use App\Models\Pirep;
+use App\Models\User;
+use App\Notifications\NotificationEventsHandler;
+use App\Repositories\{AircraftRepository, AirportRepository, FlightRepository, PirepRepository};
+use App\Services\Finance\PirepFinanceService;
+use App\Services\{AirportService, FareService, GeoService, PirepAfterCommit, PirepService, SimBriefService, UserService};
+use Illuminate\Config\Repository;
+use Illuminate\Container\Container;
+use Illuminate\Database\Connectors\ConnectionFactory;
+use Illuminate\Database\DatabaseManager;
+use Illuminate\Database\DatabaseTransactionsManager;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\QueryException;
+use Illuminate\Events\Dispatcher;
+use Illuminate\Support\Facades\{DB, Facade};
+use Modules\DisposableBasic\Listeners\Gen_AutoReject;
+
+$site = getenv('PIREP_FIXTURE_SITE');
+foreach (['PirepAccepted', 'PirepRejected', 'PirepFiled', 'PirepCancelled', 'UserStatsChanged', 'ProcessAward'] as $event) {
+    require $site.'/app/Events/'.$event.'.php';
+}
+foreach (['app/Services/PirepAfterCommit.php', 'app/Services/UserService.php', 'app/Services/PirepService.php',
+    'app/Services/AircraftService.php', 'app/Listeners/FinanceEventHandler.php', 'app/Listeners/AwardHandler.php',
+    'app/Notifications/NotificationEventsHandler.php', 'modules/DisposableBasic/Listeners/Gen_AutoReject.php'] as $source) {
+    require $site.'/'.$source;
+}
+
+$app = new Container();
+$app->instance('config', new Repository(['database' => ['default' => 'mysql', 'connections' => ['mysql' => [
+    'driver' => 'mysql', 'host' => 'pirep-mysql', 'database' => 'vuscg_pirep_fixture',
+    'username' => 'fixture', 'password' => 'local_fixture_only', 'strict' => true,
+]]]]));
+$events = new Dispatcher($app);
+$app->instance('events', $events);
+$app->instance('db.transactions', new DatabaseTransactionsManager());
+$app->instance('log', new class {
+    public function __call(string $name, array $arguments) { return null; }
+});
+$db = new DatabaseManager($app, new ConnectionFactory($app));
+$app->instance('db', $db);
+Facade::setFacadeApplication($app);
+Model::setConnectionResolver($db);
+Model::setEventDispatcher($events);
+
+function app(string $class) { global $app; return $app->make($class); }
+function config(string $key, mixed $default = null) { return app('config')->get($key, $default); }
+function event(object $event): void { app('events')->dispatch($event); }
+function setting(string $name, mixed $default = null): mixed {
+    return in_array($name, ['notifications.mail_pirep_user_ack', 'notifications.mail_pirep_user_rej'], true);
+}
+function DB_Setting(string $name, mixed $default): mixed {
+    return match ($name) {
+        'dbasic.autoreject' => getenv('PIREP_FIXTURE_AUTOREJECT') === '1',
+        'dbasic.ar_marginscore' => 50,
+        default => $default,
+    };
+}
+function expectSame($actual, $expected, string $label): void {
+    if ($actual !== $expected) {
+        throw new RuntimeException($label.' expected '.json_encode($expected).', got '.json_encode($actual));
+    }
+}
+
+$userSvc = (new ReflectionClass(UserService::class))->newInstanceWithoutConstructor();
+$service = new PirepService(new AirportRepository(), new AirportService(), new AircraftRepository(), new FareService(),
+    new FlightRepository(), new GeoService(), new PirepRepository(), new SimBriefService(), $userSvc);
+$notifications = new NotificationEventsHandler();
+$finance = new FinanceEventHandler(new PirepFinanceService());
+$award = new AwardHandler();
+$autoReject = new Gen_AutoReject();
+$failureStage = null;
+$events->listen("eloquent.updated: ".User::class, static function () use (&$failureStage): void {
+    if ($failureStage === 'pilot') throw new LogicException('fixture pilot');
+});
+$events->listen("eloquent.updated: ".Aircraft::class, static function () use (&$failureStage): void {
+    if ($failureStage === 'aircraft') throw new LogicException('fixture aircraft');
+});
+$events->listen(PirepFiled::class, function ($e) use ($autoReject) {
+    DB::table('fixture_events')->insert(['kind' => 'filed', 'pirep_id' => $e->pirep->id]);
+    $autoReject->handle($e);
+});
+$events->listen(PirepAccepted::class, function ($e) use ($finance, $notifications, &$failureStage) {
+    DB::table('fixture_events')->insert(['kind' => 'accepted', 'pirep_id' => $e->pirep->id]);
+    $notifications->onPirepAccepted($e);
+    $finance->onPirepAccept($e);
+    if ($failureStage === 'finance') throw new LogicException('fixture finance');
+});
+$events->listen(PirepRejected::class, function ($e) use ($finance, $notifications) {
+    DB::table('fixture_events')->insert(['kind' => 'rejected', 'pirep_id' => $e->pirep->id]);
+    $finance->onPirepReject($e);
+    $notifications->onPirepRejected($e);
+});
+$events->listen(ProcessAward::class, function ($e) use ($award, &$failureStage) {
+    DB::table('fixture_events')->insert(['kind' => 'award', 'pirep_id' => $e->user->last_pirep_id]);
+    $award->processAward($e);
+    if ($failureStage === 'award') throw new LogicException('fixture award');
+});
+DB::statement('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+
+function perform(PirepService $service, string $operation, string $id) {
+    return match ($operation) {
+        'native-approve', 'native-reject', 'timeout' => $service->review($id, $operation === 'native-reject' ? 6 : 2, 'legacy'),
+        'bridge-approve', 'bridge-reject' => $service->review($id, $operation === 'bridge-reject' ? 6 : 2),
+        'file' => [$service->fileAndSubmit($id, ['flight_time' => 45, 'source' => 1], [], [], static function (): void {}), true],
+    };
+}
+if (($argv[1] ?? null) === 'worker') {
+    [$script, $action, $operation, $id, $signal] = $argv;
+    DB::statement('SET SESSION innodb_lock_wait_timeout = '.($operation === 'timeout' ? '1' : '8'));
+    try {
+        $result = DB::transaction(function () use ($service, $operation, $id, $signal) {
+            // Establish an older read view before attempting the lock, as a native caller can.
+            Pirep::query()->findOrFail($id);
+            echo "ready\n";
+            [$report, $changed] = perform($service, $operation, $id);
+            if ($signal !== '-') {
+                expectSame(DB::table('fixture_external')->count(), 0, 'No delivery while the enclosing transaction is open');
+                echo "holding\n";
+                $deadline = microtime(true) + 8;
+                do {
+                    clearstatcache(true, $signal);
+                    if (is_file($signal)) {
+                        break;
+                    }
+                    usleep(10_000);
+                } while (microtime(true) < $deadline);
+                if (!is_file($signal)) {
+                    throw new RuntimeException('No release signal for writer');
+                }
+            }
+            return [$report?->state, $changed];
+        });
+        echo json_encode($result)."\n";
+    } catch (Throwable $error) {
+        $cause = $error instanceof QueryException ? $error : $error->getPrevious();
+        if ($operation !== 'timeout' || !$cause instanceof QueryException || (int) ($cause->errorInfo[1] ?? 0) !== 1205) {
+            throw $error;
+        }
+        echo "timeout\n";
+    }
+    exit;
+}
+
+function resetFixture(int $state = 1, int $score = 100): void {
+    foreach (['fixture_events', 'fixture_external', 'fixture_awards', 'fixture_journal',
+        'pirep_comments', 'pirep_field_values', 'pireps', 'users', 'aircraft'] as $table) {
+        DB::table($table)->delete();
+    }
+    DB::table('users')->insert(['id' => 1, 'rank_id' => 1, 'flights' => 3, 'flight_time' => 100, 'curr_airport_id' => 'KAAA']);
+    DB::table('aircraft')->insert(['id' => 1, 'flight_time' => 200, 'airport_id' => 'KAAA', 'fuel_onboard' => 200,
+        'mtow' => 15000, 'icao' => 'H60', 'status' => 'A']);
+    foreach (['report1', 'report2'] as $id) {
+        DB::table('pireps')->insert(['id' => $id, 'user_id' => 1, 'aircraft_id' => 1, 'state' => $state, 'source' => 1,
+            'flight_time' => 45, 'block_fuel' => 500, 'fuel_used' => 350, 'score' => $score, 'arr_airport_id' => 'KBBB']);
+    }
+}
+function counterEvidence(): array {
+    $pilot = DB::table('users')->first();
+    $aircraft = DB::table('aircraft')->first();
+    return [(int) $pilot->flight_time, (int) $pilot->flights, (int) $aircraft->flight_time, (int) $pilot->rank_id,
+        $pilot->curr_airport_id, $aircraft->airport_id, (int) $aircraft->fuel_onboard];
+}
+function checkEffects(int $state, array $counters, array $events, array $external): void {
+    expectSame(Pirep::findOrFail('report1')->state, $state, 'Final report state');
+    expectSame(counterEvidence(), $counters, 'Pilot minutes, flights, aircraft minutes, rank, locations and fuel');
+    expectSame(DB::table('fixture_events')->orderBy('id')->pluck('kind')->all(), $events, 'Synchronous events');
+    expectSame(DB::table('fixture_external')->orderBy('id')->pluck('kind')->all(), $external, 'Post-commit notifications');
+}
+function child(string $operation, string $id, string $signal = '-'): array {
+    $proc = proc_open([PHP_BINARY, __FILE__, 'worker', $operation, $id, $signal],
+        [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => STDERR], $pipes);
+    stream_set_timeout($pipes[1], 10);
+    return [$proc, $pipes[1]];
+}
+function line(array $child): string {
+    $line = fgets($child[1]);
+    if ($line === false) {
+        throw new RuntimeException('Writer failed to report its result');
+    }
+    return trim($line);
+}
+function finishChild(array $child): void {
+    fclose($child[1]);
+    expectSame(proc_close($child[0]), 0, 'Writer exit');
+}
+function race(string $first, string $second, array $winner, array|string $loser, string $secondId = 'report1'): void {
+    $release = tempnam(sys_get_temp_dir(), 'pirep-');
+    unlink($release);
+    $holder = child($first, 'report1', $release);
+    expectSame(line($holder), 'ready', 'First writer ready');
+    expectSame(line($holder), 'holding', 'First writer owns the transaction');
+    $follower = child($second, $secondId);
+    try {
+        expectSame(line($follower), 'ready', 'Second writer opened competing transaction');
+        if ($second === 'timeout') {
+            expectSame(line($follower), $loser, 'Second writer timed out without replay');
+        } else {
+            $read = [$follower[1]];
+            $write = $except = null;
+            expectSame(stream_select($read, $write, $except, 0, 200_000), 0, 'Second writer is blocked on a shared lock');
+        }
+    } finally {
+        touch($release);
+    }
+    expectSame(json_decode(line($holder), true), $winner, 'First outcome');
+    if ($second !== 'timeout') {
+        expectSame(json_decode(line($follower), true), $loser, 'Second outcome');
+    }
+    finishChild($holder);
+    finishChild($follower);
+    unlink($release);
+}
+
+$server = DB::selectOne('SELECT VERSION() AS version, DATABASE() AS fixture');
+expectSame($server->fixture, 'vuscg_pirep_fixture', 'Disposable fixture schema');
+expectSame(DB::table('information_schema.tables')->where('TABLE_SCHEMA', $server->fixture)->count(), 0, 'Empty fixture schema');
+foreach (explode(';', file_get_contents(__DIR__.'/FixtureSchema.sql')) as $statement) {
+    if (trim($statement) !== '') {
+        DB::unprepared($statement);
+    }
+}
+DB::unprepared(file_get_contents(__DIR__.'/../../pirep-concurrency/schema.sql'));
+DB::table('ranks')->insert([
+    ['id' => 1, 'name' => 'Initial', 'hours' => 0, 'auto_promote' => 1, 'auto_approve_acars' => 1, 'auto_approve_manual' => 1],
+    ['id' => 2, 'name' => 'Rated', 'hours' => 2, 'auto_promote' => 1, 'auto_approve_acars' => 1, 'auto_approve_manual' => 1],
+]);
+DB::table('awards')->insert(['id' => 1, 'active' => 1]);
+DB::table('roles')->insert(['id' => 1, 'name' => 'admin']);
+DB::table('role_user')->insert(['role_id' => 1, 'user_id' => 1]);
+
+$before = [100, 3, 200, 1, 'KAAA', 'KAAA', 200];
+$accepted = [145, 4, 245, 2, 'KBBB', 'KBBB', 150];
+foreach ([['native-approve', 'native-approve'], ['native-approve', 'bridge-approve'],
+    ['bridge-approve', 'native-reject'], ['native-approve', 'bridge-reject']] as [$first, $second]) {
+    resetFixture();
+    race($first, $second, [2, true], [2, false]);
+    checkEffects(2, $accepted, ['accepted', 'award'], ['accepted']);
+    expectSame(DB::table('fixture_journal')->count(), 1, 'Finance row');
+    expectSame(DB::table('fixture_awards')->count(), 1, 'Award row');
+}
+resetFixture();
+race('native-reject', 'bridge-approve', [6, true], [6, false]);
+checkEffects(6, $before, ['rejected'], ['rejected']);
+
+resetFixture(0);
+race('file', 'native-approve', [2, true], [2, false]);
+checkEffects(2, $accepted, ['filed', 'accepted', 'award'], ['accepted']);
+resetFixture(0, 10);
+putenv('PIREP_FIXTURE_AUTOREJECT=1');
+race('file', 'bridge-approve', [6, true], [6, false]);
+putenv('PIREP_FIXTURE_AUTOREJECT');
+checkEffects(6, $before, ['filed', 'rejected'], ['rejected']);
+expectSame(DB::table('pirep_comments')->count(), 1, 'Native DisposableBasic wrote the reason once');
+$service->submit(Pirep::findOrFail('report1'));
+expectSame(DB::table('pirep_comments')->count(), 1, 'Replayed filing kept one reason');
+
+resetFixture();
+race('native-approve', 'timeout', [2, true], 'timeout');
+expectSame($service->review('report1', 2)[1], false, 'Retry after committed transition');
+checkEffects(2, $accepted, ['accepted', 'award'], ['accepted']);
+
+resetFixture();
+race('native-approve', 'native-approve', [2, true], [2, true], 'report2');
+checkEffects(2, [190, 5, 290, 2, 'KBBB', 'KBBB', 150], ['accepted', 'award', 'accepted', 'award'], ['accepted', 'accepted']);
+
+resetFixture();
+$stale = Pirep::findOrFail('report1');
+[$approved] = $service->review('report1', 2, 'legacy');
+$oldRevision = PirepService::reviewRevision($approved);
+expectSame($service->changeState($stale, 6)->state, 2, 'Stale snapshot must not reverse a new approval');
+[$rejected, $reversed] = $service->review('report1', 6, $oldRevision);
+expectSame($reversed, true, 'Fresh explicit reversal');
+checkEffects(6, [100, 3, 200, 2, 'KBBB', 'KBBB', 150], ['accepted', 'award', 'rejected'], ['accepted', 'rejected']);
+expectSame(DB::table('fixture_journal')->count(), 0, 'Finance removed on rejection');
+expectSame(DB::table('fixture_awards')->count(), 1, 'Existing native award policy retains the award');
+expectSame($service->review('report1', 2, PirepService::reviewRevision($rejected))[1], true, 'Explicit reapproval');
+expectSame($service->review('report1', 6, $oldRevision)[1], false, 'Old reversal receipt cannot be replayed');
+expectSame($service->deleteIfCurrent($rejected), false, 'Stale delete cannot remove a reapproved report');
+try {
+    $service->cancel(Pirep::findOrFail('report1'));
+    throw new RuntimeException('Expected an accepted report to refuse cancellation');
+} catch (\App\Exceptions\PirepCancelNotAllowed) {}
+try {
+    $service->update('report1', ['flight_time' => 90, 'state' => 0]);
+    throw new RuntimeException('Expected an accepted report to refuse edits');
+} catch (\App\Exceptions\PirepError) {}
+checkEffects(2, $accepted, ['accepted', 'award', 'rejected', 'accepted', 'award'], ['accepted', 'rejected', 'accepted']);
+
+resetFixture(0);
+$service->file(Pirep::findOrFail('report1'), ['source' => 1, 'flight_time' => 45]);
+expectSame($service->review('report1', 2)[1], false, 'Pending filing must finish before a reviewer can credit it');
+$service->submit(Pirep::findOrFail('report1'));
+$service->submit(Pirep::findOrFail('report1'));
+checkEffects(2, $accepted, ['filed', 'accepted', 'award'], ['accepted']);
+[$rejected] = $service->review('report1', 6, PirepService::reviewRevision(Pirep::findOrFail('report1')));
+expectSame($service->deleteIfCurrent($rejected), true, 'Authorized deletion of reversed report');
+expectSame(Pirep::query()->whereKey('report1')->exists(), false, 'Reversed report was deleted');
+expectSame(User::findOrFail(1)->last_pirep_id, null, 'Last report cleared after deletion');
+
+resetFixture();
+$service->review('report1', 2);
+$userSvc->recalculateStats(User::findOrFail(1));
+(new \App\Services\AircraftService())->recalculateStats();
+expectSame(array_slice(counterEvidence(), 0, 3), [45, 1, 45], 'Recounts match accepted reports');
+
+foreach (['pilot', 'aircraft', 'finance', 'award'] as $stage) {
+    resetFixture();
+    $failureStage = $stage;
+    try {
+        $service->review('report1', 2);
+        throw new RuntimeException('Expected injected failure');
+    } catch (LogicException $error) {
+        expectSame($error->getMessage(), 'fixture '.$stage, 'Failure was injected inside the transaction');
+    } finally {
+        $failureStage = null;
+    }
+    checkEffects(1, $before, [], []);
+    expectSame(DB::table('fixture_journal')->count(), 0, 'Finance rolled back');
+    expectSame(DB::table('fixture_awards')->count(), 0, 'Award rolled back');
+}
+resetFixture();
+$events->listen(PirepAccepted::class, static function ($event): void {
+    PirepAfterCommit::notify($event->pirep, 'failure', static function (): void { throw new LogicException('delivery failed'); });
+});
+expectSame($service->review('report1', 2)[1], true, 'Post-commit failure cannot make accounting fail');
+expectSame($service->review('report1', 2)[1], false, 'Retry after notification failure did not repeat accounting');
+checkEffects(2, $accepted, ['accepted', 'award'], ['accepted']);
+echo "Concurrency, filing/auto-rejection, reversals, replay, timeout, rollback and after-commit fixture passed on {$server->version}.\n";
+echo 'Initial and single-acceptance accounting '.json_encode([$before, $accepted])."\n";
+
+
+===== integrations/phpvms7/tests/pirep-concurrency/FixtureModels.php =====
+<?php
+// Small adapters for framework pieces and phpVMS models missing from the audited subset.
+
+namespace App\Contracts {
+    class Service {}
+    class Event {}
+    class Listener {}
+    class Notification {}
+}
+
+namespace App\Exceptions {
+    class PirepError extends \RuntimeException {
+        public function __construct($pirep, string $message = 'PIREP refused') { parent::__construct($message); }
+    }
+    class PirepCancelNotAllowed extends PirepError {}
+}
+
+namespace App\Models\Enums {
+    class PirepState {
+        public const IN_PROGRESS = 0, PENDING = 1, ACCEPTED = 2, CANCELLED = 3, DELETED = 4, DRAFT = 5, REJECTED = 6;
+    }
+    class PirepStatus { public const ARRIVED = 'ARR', CANCELLED = 'CNL', PAUSED = 'PAU'; }
+    class PirepSource { public const ACARS = 1, MANUAL = 0; }
+    class AcarsType { public const ROUTE = 1; }
+    class AircraftStatus { public const ACTIVE = 'A'; }
+    class UserState { public const DELETED = 99; }
+}
+
+namespace App\Models {
+    use Illuminate\Database\Eloquent\Model;
+    use Illuminate\Support\Facades\DB;
+
+    class Record extends Model {
+        protected $guarded = [];
+        public $timestamps = false;
+    }
+    class Pirep extends Record {
+        use \Illuminate\Database\Eloquent\SoftDeletes;
+        public $incrementing = false;
+        protected $keyType = 'string';
+        public $timestamps = true;
+        public static $cancel_states = [2, 3, 4, 6];
+        protected $casts = ['block_on_time' => 'datetime', 'submitted_at' => 'datetime'];
+        public function aircraft() { return $this->belongsTo(Aircraft::class); }
+        public function user() { return $this->belongsTo(User::class); }
+        public function getFlightAttribute() { return null; }
+        public function getSimbriefAttribute() { return null; }
+        public function getBlockFuelAttribute($value) { return new \App\Support\Units\Fuel($value); }
+        public function getFuelUsedAttribute($value) { return new \App\Support\Units\Fuel($value); }
+        public function getReadOnlyAttribute() { return in_array($this->state, self::$cancel_states, true); }
+    }
+    class User extends Record {
+        public function rank() { return $this->belongsTo(Rank::class); }
+        public function notify($message) {
+            if (DB::transactionLevel() !== 0) {
+                throw new \LogicException('Notification escaped before commit');
+            }
+            DB::table('fixture_external')->insert(['kind' => $message->kind, 'pirep_id' => $message->pirep->getKey()]);
+        }
+    }
+    class Rank extends Record {
+        protected $casts = ['auto_promote' => 'boolean'];
+    }
+    class Aircraft extends Record {
+        protected $table = 'aircraft';
+        public function setFuelOnboardAttribute($fuel) { $this->attributes['fuel_onboard'] = $fuel->internal(); }
+    }
+    class Award extends Record {
+        public function getReference($award, $user) {
+            return new class ($award->id, $user->id) {
+                public function __construct(private int $awardId, private int $userId) {}
+                public function handle(): void {
+                    DB::table('fixture_awards')->insertOrIgnore(['award_id' => $this->awardId, 'user_id' => $this->userId]);
+                }
+            };
+        }
+    }
+    class Acars extends Record { protected $table = 'acars'; }
+    class PirepComment extends Record { use \Illuminate\Database\Eloquent\SoftDeletes; }
+    class PirepFare extends Record { use \Illuminate\Database\Eloquent\SoftDeletes; }
+    class PirepFieldValue extends Record { use \Illuminate\Database\Eloquent\SoftDeletes; }
+    class SimBrief extends Record { use \Illuminate\Database\Eloquent\SoftDeletes; protected $table = 'simbrief'; }
+}
+
+namespace App\Support\Units {
+    class Fuel {
+        public function __construct(private int $amount) {}
+        public static function make($amount, $unit): self { return new self($amount); }
+        public function internal(): int { return $this->amount; }
+    }
+    class Time {
+        public int $hours;
+        public function __construct(int $minutes) { $this->hours = intdiv($minutes, 60); }
+    }
+}
+
+namespace App\Services {
+    class AirportService {}
+    class FareService { public function saveToPirep($pirep, $fares): void {} }
+    class GeoService {}
+    class SimBriefService {}
+}
+
+namespace App\Repositories {
+    class AirportRepository {}
+    class AircraftRepository {}
+    class FlightRepository {}
+    class PirepRepository {}
+}
+
+namespace App\Services\Finance {
+    use Illuminate\Support\Facades\DB;
+
+    class PirepFinanceService {
+        public function processFinancesForPirep($pirep): void {
+            DB::table('fixture_journal')->insert(['pirep_id' => $pirep->getKey(), 'amount' => 120]);
+        }
+        public function deleteFinancesForPirep($pirep): void {
+            DB::table('fixture_journal')->where('pirep_id', $pirep->getKey())->delete();
+        }
+    }
+}
+
+namespace App\Notifications\Messages {
+    class PirepAccepted extends \App\Contracts\Notification {
+        public string $kind = 'accepted';
+        public function __construct(public object $pirep) {}
+    }
+    class PirepRejected extends \App\Contracts\Notification {
+        public string $kind = 'rejected';
+        public function __construct(public object $pirep) {}
+    }
+}
+
+namespace App\Notifications\Notifiables {
+    class Broadcast {}
+}
+
+
+===== integrations/phpvms7/tests/pirep-concurrency/FixtureSchema.sql =====
+CREATE TABLE users (id INT PRIMARY KEY, rank_id INT, flight_time INT, flights INT,
+    transfer_time INT DEFAULT 0, curr_airport_id VARCHAR(4), last_pirep_id VARCHAR(30), state INT DEFAULT 1) ENGINE=InnoDB;
+CREATE TABLE aircraft (id INT PRIMARY KEY, flight_time INT, airport_id VARCHAR(4), landing_time DATETIME,
+    fuel_onboard INT, mtow INT, icao VARCHAR(8), status CHAR(1)) ENGINE=InnoDB;
+CREATE TABLE ranks (id INT PRIMARY KEY, name VARCHAR(30), hours INT, auto_promote BOOLEAN,
+    auto_approve_acars BOOLEAN, auto_approve_manual BOOLEAN) ENGINE=InnoDB;
+CREATE TABLE pireps (id VARCHAR(30) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY, user_id INT NOT NULL,
+    aircraft_id INT, state INT, status VARCHAR(8), source INT, flight_time INT, block_fuel INT,
+    fuel_used INT, planned_flight_time INT DEFAULT 0, score INT DEFAULT 100, landing_rate INT DEFAULT 0,
+    arr_airport_id VARCHAR(4), route VARCHAR(128) NULL, block_on_time DATETIME, submitted_at DATETIME,
+    created_at DATETIME, updated_at DATETIME, deleted_at DATETIME) ENGINE=InnoDB;
+CREATE TABLE acars (id INT PRIMARY KEY AUTO_INCREMENT, pirep_id VARCHAR(30), type INT) ENGINE=InnoDB;
+CREATE TABLE roles (id INT PRIMARY KEY, name VARCHAR(40)) ENGINE=InnoDB;
+CREATE TABLE role_user (role_id INT, user_id INT) ENGINE=InnoDB;
+CREATE TABLE pirep_comments (id INT PRIMARY KEY AUTO_INCREMENT, pirep_id VARCHAR(30), user_id INT,
+    comment VARCHAR(200), created_at DATETIME, updated_at DATETIME, deleted_at DATETIME) ENGINE=InnoDB;
+CREATE TABLE pirep_field_values (id INT PRIMARY KEY AUTO_INCREMENT, pirep_id VARCHAR(30), name VARCHAR(30),
+    slug VARCHAR(50), value VARCHAR(100), source INT, deleted_at DATETIME) ENGINE=InnoDB;
+CREATE TABLE pirep_fares (id INT PRIMARY KEY AUTO_INCREMENT, pirep_id VARCHAR(30), deleted_at DATETIME) ENGINE=InnoDB;
+CREATE TABLE simbrief (id INT PRIMARY KEY AUTO_INCREMENT, pirep_id VARCHAR(30), deleted_at DATETIME) ENGINE=InnoDB;
+CREATE TABLE awards (id INT PRIMARY KEY, active BOOLEAN) ENGINE=InnoDB;
+CREATE TABLE fixture_awards (user_id INT, award_id INT, PRIMARY KEY (user_id, award_id)) ENGINE=InnoDB;
+CREATE TABLE fixture_journal (pirep_id VARCHAR(30) PRIMARY KEY, amount INT) ENGINE=InnoDB;
+CREATE TABLE fixture_events (id INT PRIMARY KEY AUTO_INCREMENT, kind VARCHAR(12), pirep_id VARCHAR(30)) ENGINE=InnoDB;
+CREATE TABLE fixture_external (id INT PRIMARY KEY AUTO_INCREMENT, kind VARCHAR(12), pirep_id VARCHAR(30)) ENGINE=InnoDB;
+
+
+===== integrations/phpvms7/tests/pirep-concurrency/run.sh =====
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/../../../.." && pwd)
+site=$(realpath "${1:?Provide the disposable PHP source tree with installed-source.patch applied}")
+vendor=$(realpath "${2:?Provide an isolated Composer vendor directory with Illuminate Database, Config and Events 10.48}")
+image=${3:-vuscg-php-mysql:local}
+version=${4:-5.7.44}
+case "$version" in 5.7.44|8.4) ;; *) exit 1 ;; esac
+
+network=$(docker network create --internal "vuscg-pirep-fixture-$$")
+server=
+cleanup() {
+  if [[ -n $server ]]; then docker stop "$server" >/dev/null; fi
+  docker network rm "$network" >/dev/null
+}
+trap cleanup EXIT
+server=$(docker run --network "$network" --network-alias pirep-mysql --rm -d \
+  -e MYSQL_ALLOW_EMPTY_PASSWORD=yes -e MYSQL_DATABASE=vuscg_pirep_fixture \
+  -e MYSQL_USER=fixture -e MYSQL_PASSWORD=local_fixture_only "mysql:$version")
+for try in {1..60}; do
+  if docker exec "$server" mysqladmin --protocol TCP -h 127.0.0.1 ping --silent >/dev/null 2>&1; then
+    break
+  fi
+  if [[ $try == 60 ]]; then
+    echo 'Disposable MySQL timed out' >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+docker run --rm --network "$network" -v "$repo:/repo:ro" -v "$site:/candidate:ro" -v "$vendor:/vendor:ro" \
+  -e PIREP_FIXTURE_AUTOLOAD=/vendor/autoload.php -e PIREP_FIXTURE_SITE=/candidate \
+  "$image" php /repo/integrations/phpvms7/tests/pirep-concurrency/ConcurrencyFixture.php
+
+
+===== integrations/phpvms7/tests/PirepDecisionGateTest.php =====
+<?php
+
+use Modules\VuscgCustom\Services\PirepDecisionGate as Gate;
+
+require dirname(__DIR__).'/modules/VuscgCustom/Services/PirepDecisionGate.php';
+
+foreach ([
+    [true, 'production', 1, false],
+    [true, 'local', 1, false],
+    [true, 'staging', 1, true],
+    [true, 'testing', 1, true],
+    [true, 'staging', null, false],
+    [true, 'staging', 2, false],
+    ['true', 'staging', 1, false],
+    [false, 'staging', 1, false],
+    [null, 'testing', 1, false],
+] as [$flag, $environment, $protocol, $expected]) {
+    if (Gate::allows($environment, $flag, $protocol) !== $expected) {
+        throw new RuntimeException('PIREP decision gate regression.');
+    }
+}
+
+echo "PIREP decisions remain blocked in production, with explicit activation in staging/testing only.\n";
+
+
+===== integrations/phpvms7/tests/PirepReviewBridgeTest.php =====
+<?php
+
+namespace Tests\Feature;
+
+use App\Events\PirepAccepted;
+use App\Events\ProcessAward;
+use App\Events\UserStatsChanged;
+use App\Models\Pirep;
+use App\Services\PirepService;
+use Illuminate\Events\Dispatcher;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Testing\TestResponse;
+use Tests\TestCase;
+
+class PirepReviewBridgeTest extends TestCase
+{
+    private string $secret;
+    private string $missingId;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        if (!app()->environment('testing')) {
+            $this->markTestSkipped('Requires an isolated phpVMS testing environment.');
+        }
+        $this->secret = bin2hex(random_bytes(32));
+        $this->missingId = bin2hex(random_bytes(16));
+        config(['vuscg_pirep_review.secret' => $this->secret, 'vuscg_pirep_review.decisions_enabled' => false]);
+    }
+
+    public function test_rejects_wrong_signature_expired_timestamp_and_replay(): void
+    {
+        $payload = ['pirep_id' => $this->missingId];
+        $this->send('status', $payload, key: bin2hex(random_bytes(32)))->assertUnauthorized();
+        $this->send('status', $payload, timestamp: time() - 61)->assertUnauthorized();
+
+        $nonce = bin2hex(random_bytes(16));
+        $this->send('status', $payload, nonce: $nonce)->assertNotFound()->assertJsonPath('code', 'not_found');
+        $this->send('status', $payload, nonce: $nonce)->assertUnauthorized()->assertJsonPath('code', 'replay');
+    }
+
+    public function test_invalid_input_and_disabled_decisions_do_not_call_native_service(): void
+    {
+        $this->mock(PirepService::class)->shouldNotReceive('review');
+        $payload = [
+            'pirep_id' => $this->missingId,
+            'action' => 'approve',
+            'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => null],
+        ];
+        $this->send('decision', array_replace($payload, ['action' => 'delete']))->assertUnprocessable();
+        $this->send('decision', array_replace($payload, ['pirep_id' => 123]))->assertUnprocessable();
+        $this->send('decision', $payload)->assertStatus(503)->assertJsonPath('code', 'disabled');
+    }
+
+    public function test_pending_decisions_delegate_to_shared_native_service(): void
+    {
+        $id = getenv('PIREP_BRIDGE_TEST_PENDING_ID');
+        if (!$id) {
+            $this->markTestSkipped('Requires a disposable pending PIREP fixture with a pilot and aircraft.');
+        }
+
+        $connection = (new Pirep())->getConnection();
+        $connection->beginTransaction();
+        try {
+            config(['vuscg_pirep_review.decisions_enabled' => true]);
+            $pirep = Pirep::query()->findOrFail($id);
+            $this->assertSame(1, $pirep->state);
+            $service = $this->mock(PirepService::class);
+            foreach (['approve' => 2, 'reject' => 6] as $action => $state) {
+                $pirep->state = 1;
+                $pirep->save();
+                $service->shouldReceive('review')->twice()->with($id, $state)->andReturnUsing(function () use ($id, $state): array {
+                    $report = Pirep::query()->findOrFail($id);
+                    if ($report->state !== 1) {
+                        return [$report, false];
+                    }
+                    $report->state = $state;
+                    $report->save();
+
+                    return [$report, true];
+                });
+                $payload = [
+                    'pirep_id' => $id,
+                    'action' => $action,
+                    'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => 'C121'],
+                ];
+                $this->send('decision', $payload)->assertOk()->assertJsonPath('state', $state);
+                $this->send('decision', $payload)->assertStatus(409)->assertJsonPath('state', $state);
+                $this->send('status', ['pirep_id' => $id])->assertOk()->assertJsonPath('state', $state);
+            }
+        } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_real_bridge_credits_only_the_first_acceptance(): void
+    {
+        $id = getenv('PIREP_BRIDGE_TEST_NATIVE_PENDING_ID');
+        if (!$id) {
+            $this->markTestSkipped('Requires an isolated native-accounting PIREP fixture.');
+        }
+
+        Event::fake([PirepAccepted::class, ProcessAward::class, UserStatsChanged::class]);
+        $connection = (new Pirep())->getConnection();
+        $connection->beginTransaction();
+        try {
+            config(['vuscg_pirep_review.decisions_enabled' => true]);
+            $pirep = Pirep::query()->findOrFail($id);
+            $this->assertSame(1, $pirep->state);
+            $minutes = (int) $pirep->flight_time;
+            $this->assertGreaterThan(0, $minutes);
+            $pilot = $pirep->user;
+            $aircraft = $pirep->aircraft;
+            $pilotMinutes = (int) $pilot->flight_time;
+            $pilotFlights = (int) $pilot->flights;
+            $aircraftMinutes = (int) $aircraft->flight_time;
+            $payload = [
+                'pirep_id' => $id,
+                'action' => 'approve',
+                'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => 'C121'],
+            ];
+
+            $this->send('decision', $payload)->assertOk()->assertJsonPath('state', 2);
+            $this->send('decision', $payload)->assertStatus(409)->assertJsonPath('state', 2);
+            $this->send('status', ['pirep_id' => $id])->assertOk()->assertJsonPath('state', 2);
+
+            $this->assertSame($pilotMinutes + $minutes, (int) $pilot->fresh()->flight_time);
+            $this->assertSame($pilotFlights + 1, (int) $pilot->fresh()->flights);
+            $this->assertSame($aircraftMinutes + $minutes, (int) $aircraft->fresh()->flight_time);
+            $this->assertSame((string) $pirep->arr_airport_id, (string) $pilot->fresh()->curr_airport_id);
+            $this->assertSame((string) $pirep->arr_airport_id, (string) $aircraft->fresh()->airport_id);
+            $this->assertSame((string) $pirep->id, (string) $pilot->fresh()->last_pirep_id);
+            Event::assertDispatchedTimes(PirepAccepted::class, 1);
+            Event::assertDispatchedTimes(ProcessAward::class, 1);
+        } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_production_refuses_signed_writes_even_with_the_decision_flag_enabled(): void
+    {
+        $previous = app()->environment();
+        app()->instance('env', 'production');
+        config(['vuscg_pirep_review.decisions_enabled' => true]);
+        try {
+            $this->mock(PirepService::class)->shouldNotReceive('review');
+            $this->send('decision', [
+                'pirep_id' => $this->missingId,
+                'action' => 'approve',
+                'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => null],
+            ])->assertStatus(503)->assertJsonPath('code', 'disabled');
+        } finally {
+            app()->instance('env', $previous);
+        }
+    }
+
+    public function test_native_accounting_rolls_back_when_acceptance_throws(): void
+    {
+        $id = getenv('PIREP_BRIDGE_TEST_NATIVE_PENDING_ID');
+        if (!$id) {
+            $this->markTestSkipped('Requires an isolated native-accounting PIREP fixture.');
+        }
+
+        $connection = (new Pirep())->getConnection();
+        $originalDispatcher = Event::getFacadeRoot();
+        $isolated = new Dispatcher($this->app);
+        $seen = 0;
+        $isolated->listen(PirepAccepted::class, function () use (&$seen): void {
+            $seen++;
+            throw new \LogicException('Fixture failure after native accounting');
+        });
+        Event::swap($isolated);
+        $connection->beginTransaction();
+        try {
+            $this->withoutExceptionHandling();
+            config(['vuscg_pirep_review.decisions_enabled' => true]);
+            $report = Pirep::query()->findOrFail($id);
+            $this->assertSame(1, $report->state);
+            $pilot = $report->user;
+            $aircraft = $report->aircraft;
+            $pilotBefore = $pilot->getRawOriginal();
+            $aircraftBefore = $aircraft->getRawOriginal();
+            try {
+                $this->send('decision', [
+                    'pirep_id' => $id, 'action' => 'approve',
+                    'reviewer' => ['discord_id' => '123456789012345678', 'pilot_number' => null],
+                ]);
+                $this->fail('Expected the injected synchronous listener to fail.');
+            } catch (\LogicException $exception) {
+                $this->assertSame('Fixture failure after native accounting', $exception->getMessage());
+            }
+            $this->assertSame(1, $seen);
+            $this->assertSame(1, $report->fresh()->state);
+            $this->assertSame($pilotBefore, $pilot->fresh()->getRawOriginal());
+            $this->assertSame($aircraftBefore, $aircraft->fresh()->getRawOriginal());
+        } finally {
+            Event::swap($originalDispatcher);
+            $connection->rollBack();
+        }
+    }
+
+    private function send(
+        string $operation,
+        array $payload,
+        ?int $timestamp = null,
+        ?string $nonce = null,
+        ?string $key = null
+    ): TestResponse {
+        $path = '/api/vuscgcustom/pirep-review/'.$operation;
+        $body = json_encode($payload, JSON_THROW_ON_ERROR);
+        $timestamp ??= time();
+        $nonce ??= bin2hex(random_bytes(16));
+        $signature = hash_hmac('sha256', implode("\n", ['POST', $path, $timestamp, $nonce, $body]), $key ?? $this->secret);
+
+        return $this->call('POST', $path, [], [], [], [
+            'HTTPS' => 'on',
+            'HTTP_ACCEPT' => 'application/json',
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_X_VUSCG_TIMESTAMP' => (string) $timestamp,
+            'HTTP_X_VUSCG_NONCE' => $nonce,
+            'HTTP_X_VUSCG_SIGNATURE' => $signature,
+        ], $body);
+    }
+}
+
+
+===== integrations/phpvms7/modules/VuscgCustom/Http/Controllers/Api/PirepReviewController.php =====
+<?php
+
+namespace Modules\VuscgCustom\Http\Controllers\Api;
+
+use App\Models\Enums\PirepState;
+use App\Models\Pirep;
+use App\Services\PirepService;
+use Illuminate\Database\QueryException;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use JsonException;
+use Modules\VuscgCustom\Services\PirepDecisionGate;
+
+class PirepReviewController
+{
+    private const CLOCK_WINDOW = 60;
+
+    public function status(Request $request): JsonResponse
+    {
+        return $this->handle($request, false);
+    }
+
+    public function decision(Request $request): JsonResponse
+    {
+        return $this->handle($request, true);
+    }
+
+    private function handle(Request $request, bool $decision): JsonResponse
+    {
+        if (!$request->isSecure() || $request->getQueryString() !== null) {
+            return response()->json(['code' => 'unauthorized'], 401);
+        }
+        $body = $request->getContent();
+        if (strlen($body) > 1024) {
+            return response()->json(['code' => 'too_large'], 413);
+        }
+
+        $timestamp = $request->header('X-VUSCG-Timestamp', '');
+        $nonce = $request->header('X-VUSCG-Nonce', '');
+        $signature = $request->header('X-VUSCG-Signature', '');
+        $secret = config('vuscg_pirep_review.secret');
+        $now = time();
+        if (!is_string($secret) || !preg_match('/\A[a-f0-9]{64}\z/', $secret)
+            || !preg_match('/\A[0-9]{10}\z/', $timestamp)
+            || abs($now - (int) $timestamp) > self::CLOCK_WINDOW
+            || !preg_match('/\A[a-f0-9]{32}\z/', $nonce)
+            || !preg_match('/\A[a-f0-9]{64}\z/', $signature)) {
+            return response()->json(['code' => 'unauthorized'], 401);
+        }
+
+        $signed = implode("\n", [$request->method(), $request->getBaseUrl().$request->getPathInfo(),
+            $timestamp, $nonce, $body]);
+        if (!hash_equals(hash_hmac('sha256', $signed, $secret), $signature)) {
+            return response()->json(['code' => 'unauthorized'], 401);
+        }
+
+        $connection = (new Pirep())->getConnection();
+        $reserved = $connection->table('vuscg_pirep_review_nonces')->insertOrIgnore([
+            'nonce' => $nonce,
+            'expires_at' => (int) $timestamp + self::CLOCK_WINDOW,
+        ]);
+        if ($reserved !== 1) {
+            return response()->json(['code' => 'replay'], 401);
+        }
+
+        try {
+            $payload = json_decode($body, true, 8, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            return response()->json(['code' => 'invalid'], 422);
+        }
+
+        $id = $payload['pirep_id'] ?? null;
+        if (!is_string($id) || !preg_match('/\A[A-Za-z0-9_-]{1,64}\z/', $id)) {
+            return response()->json(['code' => 'invalid'], 422);
+        }
+
+        if (!$decision) {
+            if (count($payload) !== 1) {
+                return $this->result('invalid', $id, null, 422);
+            }
+            $pirep = Pirep::query()->useWritePdo()->whereKey($id)->first();
+            if (!$pirep || $pirep->getKey() !== $id) {
+                return $this->result('not_found', $id, null, 404);
+            }
+            return is_int($pirep->state)
+                ? $this->result('status', $id, $pirep->state)
+                : $this->result('disabled', $id, null, 503);
+        }
+
+        $action = $payload['action'] ?? null;
+        $reviewer = $payload['reviewer'] ?? null;
+        $discordId = $reviewer['discord_id'] ?? null;
+        $pilotNumber = $reviewer['pilot_number'] ?? null;
+        if (count($payload) !== 3 || !in_array($action, ['approve', 'reject'], true)
+            || !is_array($reviewer) || count($reviewer) !== 2 || !array_key_exists('pilot_number', $reviewer)
+            || !is_string($discordId) || !preg_match('/\A[0-9]{17,20}\z/', $discordId)
+            || ($pilotNumber !== null && (!is_string($pilotNumber) || !preg_match('/\AC[0-9]{1,15}\z/', $pilotNumber)))) {
+            return $this->result('invalid', $id, null, 422);
+        }
+
+        // A separate reviewed release is required before production may ever write.
+        $protocol = PirepService::class.'::VUSCG_REVIEW_PROTOCOL';
+        if (!PirepDecisionGate::allows(app()->environment(), config('vuscg_pirep_review.decisions_enabled'),
+            defined($protocol) ? constant($protocol) : null)) {
+            return $this->result('disabled', $id, null, 503);
+        }
+
+        $target = $action === 'approve' ? PirepState::ACCEPTED : PirepState::REJECTED;
+        try {
+            // No revision means pending-only. The native service owns all accounting locks.
+            [$pirep, $changed] = app(PirepService::class)->review($id, $target);
+        } catch (QueryException $error) {
+            if (!in_array((int) ($error->errorInfo[1] ?? 0), [1205, 1213], true)) {
+                throw $error;
+            }
+            return $this->result('busy', $id, null, 503);
+        }
+        if (!$pirep) {
+            return $this->result('not_found', $id, null, 404);
+        }
+        $state = $pirep->state;
+        if (!$changed && $state === PirepState::PENDING) {
+            return $this->result('busy', $id, null, 503);
+        }
+        if ($changed && $state !== $target) {
+            throw new \RuntimeException('Native PIREP service returned an unexpected state.');
+        }
+        [$code, $status] = $changed ? ['changed', 200] : ['not_pending', 409];
+
+        if ($code === 'changed') {
+            Log::info('vUSCG PIREP review committed', [
+                'pirep_id' => $id, 'state' => $state, 'discord_id' => $discordId, 'pilot_number' => $pilotNumber,
+            ]);
+        }
+        return $this->result($code, $id, $state, $status);
+    }
+
+    private function result(string $code, string $id, ?int $state, int $status = 200): JsonResponse
+    {
+        return response()->json(['code' => $code, 'pirep_id' => $id, 'state' => $state], $status);
+    }
+}
+
+
+===== integrations/phpvms7/modules/VuscgCustom/Services/PirepDecisionGate.php =====
+<?php
+
+namespace Modules\VuscgCustom\Services;
+
+final class PirepDecisionGate
+{
+    public static function allows(string $environment, mixed $enabled, mixed $protocol): bool
+    {
+        return $protocol === 1 && $enabled === true && in_array($environment, ['testing', 'staging'], true);
+    }
+}
+
+
+===== utils/pirepBridge.js =====
+const { createHmac, randomBytes } = require('node:crypto');
+const fetch = require('node-fetch');
+
+const validPirepId = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(id);
+
+function createPirepBridge({
+  baseUrl = process.env.PIREP_BRIDGE_URL,
+  secret = process.env.PIREP_BRIDGE_SECRET,
+  fetchImpl = fetch,
+  timeout = 5000,
+} = {}) {
+  async function request(operation, payload) {
+    let url;
+    try {
+      url = new URL(baseUrl);
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash ||
+          !/^[a-f0-9]{64}$/.test(secret ?? '')) throw new Error();
+    } catch {
+      return { code: 'unconfigured' };
+    }
+
+    url.pathname = url.pathname.replace(/\/$/, '') + '/api/vuscgcustom/pirep-review/' + operation;
+    const body = JSON.stringify(payload);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = randomBytes(16).toString('hex');
+    const signature = createHmac('sha256', secret)
+      .update(['POST', url.pathname, timestamp, nonce, body].join('\n')).digest('hex');
+    const signal = AbortSignal.timeout(timeout);
+    try {
+      const response = await fetchImpl(url.toString(), {
+        method: 'POST', body, signal, redirect: 'error', size: 4096,
+        headers: {
+          'Content-Type': 'application/json', Accept: 'application/json',
+          'X-VUSCG-Timestamp': timestamp, 'X-VUSCG-Nonce': nonce, 'X-VUSCG-Signature': signature,
+        },
+      });
+      if ([401, 403].includes(response.status)) return { code: 'unauthorized' };
+      if (response.status === 429) return { code: 'busy' };
+      const result = await response.json();
+      if (result.pirep_id !== payload.pirep_id) return { code: 'uncertain' };
+      if (response.status === 404 && result.code === 'not_found') return { code: 'not_found' };
+      if (response.status === 422 && result.code === 'invalid') return { code: 'invalid' };
+      if (response.status === 503 && ['disabled', 'busy'].includes(result.code)) return { code: result.code };
+      if (!Number.isInteger(result.state) || result.state < 0 || result.state > 7) return { code: 'uncertain' };
+      if (operation === 'status' && response.ok && result.code === 'status') return result;
+      if (operation === 'decision' && response.status === 409 && result.code === 'not_pending' &&
+          result.state !== 1) return result;
+      const expected = payload.action === 'approve' ? 2 : 6;
+      if (operation === 'decision' && response.ok && result.code === 'changed' &&
+          result.state === expected) return result;
+      return { code: 'uncertain' };
+    } catch {
+      return { code: 'uncertain' };
+    }
+  }
+
+  return {
+    async decide(pirepId, action, reviewer) {
+      if (!validPirepId(pirepId) || !['approve', 'reject'].includes(action)) return { code: 'invalid' };
+      const decision = await request('decision', { pirep_id: pirepId, action, reviewer });
+      if (decision.code !== 'uncertain') return decision;
+      const status = await request('status', { pirep_id: pirepId });
+      if (status.code === 'status') return { code: 'reconciled', state: status.state };
+      if (status.code === 'not_found') return status;
+      return decision;
+    },
+  };
+}
+
+module.exports = { createPirepBridge, validPirepId };
+
+
+===== utils/pendingPireps.js =====
+const fs = require('fs');
+const { createHash } = require('node:crypto');
+const { createPirepBridge, validPirepId } = require('./pirepBridge');
+const { PIREP_STATE, reportUrl, readReport, reportState } = require('./pirepEvidence');
+const { postToTrainingThread } = require('./training/threads');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+
+const CACHE_PATH = './pending_pireps_cache.json';
+
+function loadCache() {
+  try {
+    return Object.assign(Object.create(null), JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8')));
+  } catch {
+    return Object.create(null);
+  }
+}
+
+function saveCache(obj) {
+  try {
+    fs.writeFileSync(CACHE_PATH + '.tmp', JSON.stringify(obj, null, 2));
+    fs.renameSync(CACHE_PATH + '.tmp', CACHE_PATH);
+  } catch (e) {
+    console.warn('⚠️ Could not write pending PIREP cache:', e?.message ?? e);
+  }
+}
+
+function formatMinutesHHMM(totalMinutes) {
+  const m = Math.max(0, parseInt(totalMinutes, 10) || 0);
+  const h = Math.floor(m / 60);
+  const mm = String(m % 60).padStart(2, '0');
+  return `${String(h).padStart(2, '0')}:${mm}`;
+}
+
+function aircraftStatusLabel(code) {
+  const c = String(code || '').toUpperCase();
+  return (
+    {
+      A: 'Active',
+      M: 'Maintenance',
+      S: 'Stored',
+      R: 'Retired',
+      C: 'Scrapped',
+    }[c] || 'Unknown'
+  );
+}
+
+function pirepStateLabel(state) {
+  const s = Number(state);
+  return (
+    {
+      [PIREP_STATE.PENDING]: 'Pending',
+      [PIREP_STATE.ACCEPTED]: 'Approved',
+      [PIREP_STATE.REJECTED]: 'Rejected',
+      [PIREP_STATE.DELETED]: 'Deleted',
+    }[s] || `State ${s}`
+  );
+}
+
+function buildPendingEmbed(rec, pirepUrl, vatsimStatsUrl) {
+  const pilotLine = `**C${rec.pilot_id}** — ${rec.pilot_name || 'Unknown Name'}`;
+  const acLine =
+    rec.registration
+      ? `**${rec.registration}** (${rec.aircraft_icao || 'Unknown'}) — **${rec.aircraft_status || '?'}** (${aircraftStatusLabel(rec.aircraft_status)})`
+      : `Aircraft ID: **${rec.aircraft_id || 'Unknown'}**`;
+
+  const submittedTs = rec.submitted_ts ? Number(rec.submitted_ts) : Math.floor(Date.now() / 1000);
+
+  const timeHHMM = formatMinutesHHMM(rec.flight_time);
+  const distNm =
+    rec.distance != null && !Number.isNaN(Number(rec.distance))
+      ? `${Number(rec.distance).toFixed(0)} NM`
+      : '—';
+
+  return new EmbedBuilder()
+    .setTitle('🕓 Pending PIREP (Approval Required)')
+    .addFields(
+      { name: 'Pilot', value: pilotLine, inline: false },
+      { name: 'Aircraft', value: acLine, inline: false },
+      { name: 'Dep / Arr', value: `**${rec.dpt_airport_id} → ${rec.arr_airport_id}**`, inline: true },
+      { name: 'Time', value: `**${timeHHMM}**`, inline: true },
+      { name: 'Distance', value: `**${distNm}**`, inline: true },
+      { name: 'Source', value: `**${rec.source_name || 'Unknown'}**`, inline: true },
+      { name: 'Submitted', value: `<t:${submittedTs}:F>  (<t:${submittedTs}:R>)`, inline: false },
+      { name: 'Links', value: `• View PIREP: ${pirepUrl}\n• VATSIM Stats: ${vatsimStatsUrl ?? 'Not on file'}`, inline: false }
+
+    )
+    .setFooter({ text: `PIREP: ${rec.pirep_id}` });
+}
+
+function buildButtons(pirepId, pirepUrl) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`pirep:approve:${pirepId}`)
+      .setLabel('Approve')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`pirep:reject:${pirepId}`)
+      .setLabel('Deny')
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setLabel('View')
+      .setStyle(ButtonStyle.Link)
+      .setURL(pirepUrl)
+  );
+}
+
+async function fetchPendingPireps(db) {
+  const sql = `
+    SELECT
+      p.id AS pirep_id,
+      p.user_id,
+      p.aircraft_id,
+      p.dpt_airport_id,
+      p.arr_airport_id,
+      p.flight_time,
+      p.distance,
+      p.source_name,
+      UNIX_TIMESTAMP(p.submitted_at) AS submitted_ts,
+
+      u.pilot_id,
+      u.name AS pilot_name,
+
+      (SELECT IF(COUNT(*) = 1, MIN(dl.discord_id), NULL)
+         FROM discord_links dl WHERE dl.pilot_id = u.pilot_id) AS discord_id,
+
+      ufv.value AS vatsim_cid,
+
+      a.registration,
+      a.icao AS aircraft_icao,
+      a.status AS aircraft_status
+
+    FROM pireps p
+    JOIN users u
+      ON u.id = p.user_id
+
+    LEFT JOIN aircraft a
+      ON a.id = p.aircraft_id
+
+    LEFT JOIN user_field_values ufv
+      ON ufv.user_id = u.id
+     AND ufv.user_field_id = 1
+
+    WHERE p.state = ? AND p.deleted_at IS NULL
+    ORDER BY p.submitted_at DESC
+    LIMIT 50
+  `;
+
+  const [rows] = await db.query(sql, [PIREP_STATE.PENDING]);
+  return rows || [];
+}
+
+
+function resolvedMessage(message, id, state, baseUrl, reviewer) {
+  const title = `PIREP Resolved — ${pirepStateLabel(state)}`;
+  const original = message.embeds?.[0];
+  const embed = EmbedBuilder.from(original ?? new EmbedBuilder()).setTitle(title)
+    .setColor(state === PIREP_STATE.ACCEPTED ? 0x2ecc71 : 0xe74c3c);
+  const footer = original?.title === title ? original.footer?.text : null;
+  embed.setFooter({ text: reviewer ? `PIREP: ${id} • Reviewed by ${reviewer}` : footer || `PIREP: ${id}` });
+
+  const row = new ActionRowBuilder();
+  if (state === PIREP_STATE.ACCEPTED) row.addComponents(
+    new ButtonBuilder().setCustomId(`pirep-training:${id}`).setLabel('Record Training').setStyle(ButtonStyle.Primary)
+  );
+  const url = reportUrl(id, baseUrl);
+  if (url) row.addComponents(new ButtonBuilder().setLabel('View').setStyle(ButtonStyle.Link).setURL(url));
+  return { embeds: [embed], components: row.components.length ? [row] : [], allowedMentions: { parse: [] } };
+}
+
+async function reconcileCache({ client, db, cache, pirepBaseUrl }) {
+  for (const [id, entry] of Object.entries(cache)) {
+    if (!validPirepId(id) || !entry?.channelId || !entry?.messageId) {
+      delete cache[id];
+      continue;
+    }
+    try {
+      const state = reportState(await readReport(db, id));
+      if (state === PIREP_STATE.PENDING) continue;
+      const channel = await client.channels.fetch(entry.channelId);
+      const message = await channel.messages.fetch(entry.messageId);
+      await message.edit(resolvedMessage(message, id, state, pirepBaseUrl));
+      delete cache[id];
+      saveCache(cache);
+    } catch (error) {
+      // A retry after a transient error or restart edits the same message.
+      if ([10003, 10008].includes(error.code)) delete cache[id];
+      else console.warn('Could not reconcile a PIREP review:', error.code || error.name);
+    }
+  }
+}
+
+async function tickWatcher(opts) {
+  const { client, db, guildId, trainingChannelId, pirepBaseUrl, vatsimStatsBaseUrl, fallbackChannelId } = opts;
+  const cache = loadCache();
+  await reconcileCache({ client, db, cache, pirepBaseUrl });
+  saveCache(cache);
+
+  const pending = await fetchPendingPireps(db);
+  const guild = guildId ? await client.guilds.fetch(guildId).catch(() => null) : client.guilds.cache.first();
+  if (!guild) return;
+  const parent = await guild.channels.fetch(trainingChannelId).catch(() => null);
+
+  for (const rec of pending) {
+    const id = String(rec.pirep_id);
+    const url = reportUrl(id, pirepBaseUrl);
+    if (!url || cache[id]) continue;
+
+    const cid = (rec.vatsim_cid || '').trim();
+    const stats = /^\d{6,8}$/.test(cid) ? `${vatsimStatsBaseUrl.replace(/\/$/, '')}/${cid}` : null;
+    const nonce = createHash('sha256').update('pirep-review:' + id).digest('hex').slice(0, 25);
+    const payload = {
+      embeds: [buildPendingEmbed(rec, url, stats)], components: [buildButtons(id, url)], nonce, enforceNonce: true,
+    };
+    let message;
+    try {
+      message = await postToTrainingThread(parent, { pilotId: rec.pilot_id, discordId: rec.discord_id }, {
+        ...payload, content: 'IPs: trainee filed a PIREP that needs review.',
+      });
+    } catch (error) {
+      // A send with an uncertain result must not also post to the fallback channel.
+      console.warn('Could not post a PIREP review in its training thread:', error.code || error.name);
+      continue;
+    }
+    if (!message && fallbackChannelId) {
+      const channel = await guild.channels.fetch(fallbackChannelId).catch(() => null);
+      if (channel?.isTextBased()) message = await channel.send({ ...payload, allowedMentions: { parse: [] } });
+    }
+    if (message) {
+      cache[id] = { channelId: message.channelId ?? message.channel?.id, messageId: message.id };
+      saveCache(cache);
+    }
+  }
+}
+
+function startPendingPirepWatcher(opts) {
+  const pollSeconds = Math.max(30, Number(opts.pollSeconds || 60));
+  let running = false;
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      await tickWatcher(opts);
+    } catch (error) {
+      console.warn('Pending PIREP watcher tick failed:', error.code || error.name);
+    } finally {
+      running = false;
+    }
+  }
+  void tick();
+  setInterval(tick, pollSeconds * 1000);
+}
+
+async function handlePirepButton(ctx) {
+  const { interaction, db, roles, bridge = createPirepBridge() } = ctx;
+  const reply = content => interaction.reply({ content, ephemeral: true });
+  const [, action, pirepId, ...extra] = String(interaction.customId || '').split(':');
+  const footer = interaction.message.embeds?.[0]?.footer?.text;
+  if (extra.length || !validPirepId(pirepId) || !['approve', 'reject'].includes(action) ||
+      !interaction.client.user?.id || interaction.message.author?.id !== interaction.client.user.id ||
+      !(footer === `PIREP: ${pirepId}` || footer?.startsWith(`PIREP: ${pirepId} • Reviewed by `))) {
+    return reply('❌ This review button is unavailable or does not match its PIREP.');
+  }
+
+  await interaction.deferUpdate();
+  const member = await interaction.guild.members.fetch({ user: interaction.user.id, force: true }).catch(() => null);
+  if (!member || ![roles.INSTRUCTOR_PILOT_ROLE_ID, roles.COMMAND_STAFF_ROLE_ID].some(id => id && member.roles.cache.has(id))) {
+    return interaction.followUp({ content: '❌ Your permission to review PIREPs could not be verified.', ephemeral: true });
+  }
+  const reviewer = { discord_id: interaction.user.id, pilot_number: null };
+  try {
+    const [links] = await db.query(`SELECT u.pilot_id FROM discord_links d
+      JOIN users u ON u.pilot_id = d.pilot_id WHERE d.discord_id = ? LIMIT 1`, [reviewer.discord_id]);
+    const pilotId = String(links[0]?.pilot_id ?? '');
+    if (/^[0-9]{1,15}$/.test(pilotId)) reviewer.pilot_number = 'C' + pilotId;
+  } catch {
+    console.warn('Could not look up the Discord PIREP reviewer’s linked pilot number.');
+  }
+
+  const result = await bridge.decide(pirepId, action, reviewer);
+  const resolved = Number.isInteger(result.state) && result.state !== PIREP_STATE.PENDING;
+  if (!resolved) {
+    const explanation = {
+      not_found: 'The PIREP was not found.',
+      invalid: 'The bridge rejected the PIREP ID or request.',
+      unauthorized: 'The bridge rejected authentication.',
+      busy: 'The review is temporarily busy.',
+      disabled: 'Approval through Discord is disabled.',
+      reconciled: 'The PIREP was still pending at the last check. The original request may still be running.',
+    }[result.code] ?? 'The bridge is unavailable or the outcome could not be confirmed.';
+    return interaction.followUp({
+      content: `❌ ${explanation} Check the PIREP in the native phpVMS admin interface before taking action.`,
+      ephemeral: true,
+    });
+  }
+
+  let state = result.state;
+  try {
+    if (state === PIREP_STATE.ACCEPTED) {
+      state = reportState(await readReport(db, pirepId));
+      if (state === PIREP_STATE.PENDING) throw new Error('Acceptance is not yet visible in the bot database');
+    }
+    const reviewer = result.code === 'changed' && state === result.state ? interaction.user.tag : null;
+    await interaction.editReply(resolvedMessage(interaction.message, pirepId, state, undefined, reviewer));
+  } catch {
+    return interaction.followUp({
+      content: `phpVMS reported ${pirepStateLabel(result.state)}. The review message will reconcile once the persisted state can be shown.`,
+      ephemeral: true,
+    });
+  }
+}
+
+module.exports = {
+  startPendingPirepWatcher,
+  handlePirepButton,
+  tickWatcher,
+};
+
+
