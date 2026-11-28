@@ -5,11 +5,17 @@ namespace Tests\Feature;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Modules\VuscgCustom\Services\NativeSyncDatabase;
 use Tests\TestCase;
 
 final class TraineeRatingSyncFeatureTest extends TestCase
 {
     public function test_tracks_and_stale_jobs_on_a_dedicated_native_fixture(): void
+    {
+        NativeSyncDatabase::run(fn () => $this->verify_tracks_and_stale_jobs_on_a_dedicated_native_fixture());
+    }
+
+    private function verify_tracks_and_stale_jobs_on_a_dedicated_native_fixture(): void
     {
         $publicId = getenv('VUSCG_TRAINEE_TEST_PILOT_PUBLIC_ID');
         if (!app()->environment('testing') || !$publicId) {

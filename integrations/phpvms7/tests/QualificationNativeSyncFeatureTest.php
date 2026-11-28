@@ -4,9 +4,11 @@ namespace Tests\Feature;
 
 use App\Events\AwardAwarded;
 use App\Models\User;
+use App\Models\UserAward;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
+use Modules\VuscgCustom\Services\NativeSyncDatabase;
 use Tests\TestCase;
 
 final class QualificationNativeSyncFeatureTest extends TestCase
@@ -26,6 +28,11 @@ final class QualificationNativeSyncFeatureTest extends TestCase
 
     public function test_native_award_fires_normal_event_once_and_preserves_manual_replacements(): void
     {
+        NativeSyncDatabase::run(fn () => $this->verify_native_award_fires_normal_event_once_and_preserves_manual_replacements());
+    }
+
+    private function verify_native_award_fires_normal_event_once_and_preserves_manual_replacements(): void
+    {
         $mapping = json_decode(config('vuscg_qualifications.awards'), true, 8, JSON_THROW_ON_ERROR);
         $award = $mapping['dlq']['id'];
         $pivot = fn () => DB::table('user_awards')->where(['user_id' => $this->pilot->id, 'award_id' => $award]);
@@ -44,6 +51,8 @@ final class QualificationNativeSyncFeatureTest extends TestCase
             $this->assertSame(1, $pivot()->count());
             $this->assertNotEmpty($pivot()->value('vuscg_qualification_owner'));
             Event::assertDispatchedTimes(AwardAwarded::class, 1);
+            Event::assertDispatched(AwardAwarded::class, fn (AwardAwarded $event) =>
+                $event->userAward->getConnectionName() === (new UserAward())->getConnectionName());
             // Model an explicit external removal followed by a manual replacement.
             $pivot()->delete();
             DB::table('user_awards')->insert(['user_id' => $this->pilot->id, 'award_id' => $award]);
@@ -56,6 +65,11 @@ final class QualificationNativeSyncFeatureTest extends TestCase
     }
 
     public function test_ip_role_requires_enabled_mapping_and_removes_only_owned_role(): void
+    {
+        NativeSyncDatabase::run(fn () => $this->verify_ip_role_requires_enabled_mapping_and_removes_only_owned_role());
+    }
+
+    private function verify_ip_role_requires_enabled_mapping_and_removes_only_owned_role(): void
     {
         $roles = $this->pilot->roles();
         $id = config('vuscg_qualifications.ip_role_id');
@@ -80,6 +94,33 @@ final class QualificationNativeSyncFeatureTest extends TestCase
             $this->assertFalse($pivot()->exists());
         } finally {
             DB::rollBack();
+        }
+    }
+
+    public function test_worker_connection_initializes_strict_mode_and_restores_the_website_connection(): void
+    {
+        $web = DB::connection();
+        $oldMode = $web->selectOne('SELECT @@SESSION.sql_mode AS mode', [], false)->mode;
+        $web->statement("SET SESSION sql_mode = ''");
+        try {
+            NativeSyncDatabase::run(function () use ($web): void {
+                $sync = DB::connection();
+                $this->assertNotSame($web, $sync);
+                $inspect = 'SELECT CONNECTION_ID() AS id, @@SESSION.sql_mode AS mode';
+                $first = $sync->selectOne($inspect);
+                $this->assertContains('STRICT_TRANS_TABLES', explode(',', $first->mode));
+                $this->assertEquals($first, $sync->selectOne($inspect, [], false));
+
+                DB::reconnect();
+                $replacement = $sync->selectOne($inspect);
+                $this->assertNotSame((string) $first->id, (string) $replacement->id);
+                $this->assertContains('STRICT_TRANS_TABLES', explode(',', $replacement->mode));
+                $this->assertSame('', $web->selectOne($inspect, [], false)->mode);
+            });
+            $this->assertSame($web, DB::connection());
+            $this->assertSame('', $web->selectOne('SELECT @@SESSION.sql_mode AS mode', [], false)->mode);
+        } finally {
+            $web->statement('SET SESSION sql_mode = ?', [$oldMode]);
         }
     }
 

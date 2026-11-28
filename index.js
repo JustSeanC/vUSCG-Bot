@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits } = require('discord.js');
-const mysql = require('mysql2/promise');
+const { createStrictPool } = require('./utils/databasePool');
 const fetch = require('node-fetch');
 require('dotenv').config();
 
@@ -40,7 +40,7 @@ const client = new Client({
 });
 
 // ---------- Database Pool ----------
-const db = mysql.createPool({
+const db = createStrictPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,

@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const mysql = require('mysql2/promise');
+const { createStrictPool } = require('../utils/databasePool');
 const training = require('../utils/training/service');
 const qualifications = require('../utils/training/qualifications');
 const dashboard = require('../utils/training/dashboard');
@@ -31,11 +32,12 @@ test(`Training against disposable MySQL ${version ?? ''}`.trim(), { skip: !port 
   const mysql57 = version === '5.7.44';
   const sql = relative => readFile(path.join(__dirname, '..', relative), 'utf8');
   const phaseSql = file => sql(`migrations/${mysql57 ? 'mysql57/' : ''}${file}`);
-  const db = mysql.createPool({
+  const options = {
     host: '127.0.0.1', port: Number(port),
     database: 'vuscg_training_test', user: 'training_test', password: 'training_test_local_only',
-    connectionLimit: 5, multipleStatements: true, timezone: '-08:00',
-  });
+    connectionLimit: 5, multipleStatements: true, timezone: '-08:00', flags: '-IGNORE_SPACE',
+  };
+  const db = createStrictPool(options);
   t.after(() => db.end());
 
   const [[{ detected }]] = await db.query('SELECT VERSION() AS detected');
@@ -70,6 +72,17 @@ test(`Training against disposable MySQL ${version ?? ''}`.trim(), { skip: !port 
   } else {
     await assert.rejects(db.query(await sql('migrations/mysql57/004_training_records.sql')), /VUSCG_STOP_WRONG_VERSION/);
   }
+  if (mysql57) {
+    const uninitialized = await mysql.createConnection(options);
+    try {
+      const [[modes]] = await uninitialized.query('SELECT @@GLOBAL.sql_mode AS global_mode, @@SESSION.sql_mode AS session_mode');
+      assert.deepEqual(modes, { global_mode: '', session_mode: '' }, 'Start the disposable 5.7.44 fixture with --sql-mode=');
+      await assert.rejects(uninitialized.query(await phaseSql('004_training_records.sql')), /VUSCG_STOP_WRONG_VERSION/);
+    } finally {
+      await uninitialized.end();
+    }
+  }
+
   const migration = await phaseSql('004_training_records.sql');
   await db.query(migration);
   await db.query(migration);
@@ -81,6 +94,52 @@ test(`Training against disposable MySQL ${version ?? ''}`.trim(), { skip: !port 
   assert.equal(pilot.pilot_id, 3250);
   const makeRecord = (suffix, options) => training.prepareRecord(pilot, { ...input, ...options }, {
     source: 'manual', actor, interactionId: '2200000000000000' + String(suffix).padStart(2, '0'),
+  });
+
+  await t.test('strict mode is installed before pooled, pinned and replacement connections run SQL', async () => {
+    const inspect = 'SELECT CONNECTION_ID() AS id, @@SESSION.sql_mode AS mode, @@GLOBAL.sql_mode AS global_mode';
+    const assertStrict = ({ mode, global_mode }) => {
+      assert.ok(mode.split(',').includes('STRICT_TRANS_TABLES'));
+      assert.ok(mode.split(',').includes('NO_ENGINE_SUBSTITUTION'));
+      if (mysql57) assert.equal(global_mode, '');
+    };
+    const [[pooledQuery]] = await db.query(inspect);
+    const [[pooledExecute]] = await db.execute(inspect);
+    assertStrict(pooledQuery);
+    assertStrict(pooledExecute);
+    const active = await Promise.all(Array.from({ length: 3 }, () => db.getConnection()));
+    try {
+      const sessions = await Promise.all(active.map(async connection => (await connection.execute(inspect))[0][0]));
+      sessions.forEach(assertStrict);
+      assert.equal(new Set(sessions.map(session => session.id)).size, active.length);
+    } finally {
+      active.forEach(connection => connection.release());
+    }
+
+    const single = createStrictPool({ ...options, connectionLimit: 1 });
+    try {
+      const lease = await single.getConnection();
+      const [[original]] = await lease.query(inspect);
+      await lease.query("SET SESSION sql_mode = 'ONLY_FULL_GROUP_BY'");
+      lease.release();
+      const renewed = await single.getConnection();
+      const [[renewedSession]] = await renewed.query(inspect);
+      assert.equal(renewedSession.id, original.id);
+      assertStrict(renewedSession);
+      assert.ok(renewedSession.mode.split(',').includes('ONLY_FULL_GROUP_BY'));
+      renewed.destroy();
+      const [[replacement]] = await single.execute(inspect);
+      assert.notEqual(replacement.id, original.id);
+      assertStrict(replacement);
+    } finally {
+      await single.end();
+    }
+
+    // A protected transaction must reject an out-of-range write rather than clip it.
+    const statement = "UPDATE vuscg_training_lessons SET sort_order = -1 WHERE program_id = 'rw' AND lesson_id = 'flight-1'";
+    await assert.rejects(training.transaction(db, connection => connection.query(statement)), { code: 'ER_WARN_DATA_OUT_OF_RANGE' });
+    const [[lesson]] = await db.query("SELECT sort_order FROM vuscg_training_lessons WHERE program_id = 'rw' AND lesson_id = 'flight-1'");
+    assert.equal(lesson.sort_order, 1);
   });
 
   await t.test('validates identities, enrollment, and program-specific lessons', async () => {

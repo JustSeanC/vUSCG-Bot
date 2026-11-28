@@ -25,14 +25,16 @@ if [[ $# -gt 0 ]]; then
   versions=("$@")
 fi
 for version in "${versions[@]}"; do
+  mysql_options=()
   case "$version" in
-    5.7.44|8.4) ;;
+    5.7.44) mysql_options=(--sql-mode=) ;;
+    8.4) ;;
     *) echo "Unsupported test version $version" >&2; exit 1 ;;
   esac
   fixture_id=$(docker run --rm -d \
     -e MYSQL_ALLOW_EMPTY_PASSWORD=yes -e MYSQL_DATABASE=vuscg_training_test \
     -e MYSQL_USER=training_test -e MYSQL_PASSWORD=training_test_local_only \
-    -p 127.0.0.1::3306 "mysql:$version")
+    -p 127.0.0.1::3306 "mysql:$version" "${mysql_options[@]}")
   for attempt in {1..60}; do
     if docker exec "$fixture_id" mysqladmin --protocol TCP -h 127.0.0.1 ping --silent >/dev/null 2>&1; then
       break
@@ -79,4 +81,5 @@ docker run --rm -v "$PWD:/repo:ro" -w /repo php:8.1-cli sh -ec '
   php integrations/phpvms7/tests/PirepDecisionGateTest.php
   php integrations/phpvms7/tests/QualificationNativePlanTest.php
   php integrations/phpvms7/tests/TraineeRatingPlanTest.php
+  php integrations/phpvms7/tests/NativeSyncDatabaseTest.php
 '

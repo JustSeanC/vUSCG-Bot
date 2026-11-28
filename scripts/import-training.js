@@ -1,6 +1,6 @@
 const { stat, readFile } = require('node:fs/promises');
 const { parseArgs } = require('node:util');
-const mysql = require('mysql2/promise');
+const { createStrictPool } = require('../utils/databasePool');
 const { TrainingError } = require('../utils/training/validation');
 const { parseInput, importRows, sourceIdentifier } = require('../utils/training/import');
 require('dotenv').config();
@@ -20,7 +20,7 @@ async function main() {
   const entries = parseInput(filename, await readFile(filename, 'utf8'));
   const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
   if (!DB_HOST || !DB_USER || !DB_NAME) throw new TrainingError('Configure DB_HOST, DB_USER, and DB_NAME for the intended database.');
-  const db = mysql.createPool({ host: DB_HOST, user: DB_USER, password: DB_PASSWORD, database: DB_NAME, timezone: 'Z' });
+  const db = createStrictPool({ host: DB_HOST, user: DB_USER, password: DB_PASSWORD, database: DB_NAME, timezone: 'Z' });
   try {
     const report = await importRows(db, entries, { dataset: values.dataset, apply: values.apply });
     console.log(JSON.stringify(report, null, 2));

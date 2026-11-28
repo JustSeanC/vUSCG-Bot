@@ -11,6 +11,7 @@ use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use Modules\VuscgCustom\Services\NativeSyncDatabase;
 use Modules\VuscgCustom\Services\QualificationNativePlan as Plan;
 use Modules\VuscgCustom\Services\TraineeRatingPlan;
 use Throwable;
@@ -35,8 +36,13 @@ final class SyncQualifications extends Command
             $this->error('Use a qualification event UUID.');
             return self::FAILURE;
         }
+        return NativeSyncDatabase::run(fn () => $this->sync($settings, $qualifications, $trainees, $eventId));
+    }
+
+    private function sync(array $settings, bool $qualifications, bool $trainees, ?string $eventId): int
+    {
         if (!$this->hasTrainingIntegrity()) {
-            $this->error('Native training synchronization requires the verified MySQL 5.7.44 schema, foreign keys, and strict SQL mode.');
+            $this->error('Native training synchronization requires strict SQL mode and foreign keys, plus the guarded schema on MySQL 5.7.44.');
             return self::FAILURE;
         }
         $jobs = !$qualifications ? [] : DB::table('vuscg_training_qualification_sync')->whereIn('state', ['pending', 'retry'])
@@ -130,11 +136,13 @@ final class SyncQualifications extends Command
                 FIND_IN_SET('STRICT_TRANS_TABLES', @@SESSION.sql_mode) OR
                 FIND_IN_SET('STRICT_ALL_TABLES', @@SESSION.sql_mode) AS strict_mode", [], false
         );
+        if (!(bool) $session->fk_checks || !(bool) $session->strict_mode) {
+            return false;
+        }
         if (strpos($session->version, '5.7.') !== 0) {
             return true;
         }
-        if (preg_match('/^5[.]7[.]44(?:-|$)/', $session->version) !== 1 ||
-            !(bool) $session->fk_checks || !(bool) $session->strict_mode) {
+        if (preg_match('/^5[.]7[.]44(?:-|$)/', $session->version) !== 1) {
             return false;
         }
         try {
@@ -204,10 +212,13 @@ final class SyncQualifications extends Command
 
         return $this->syncAssociation('user_awards', $identity, $marker, $active, function () use ($identity, $marker): void {
             // UserAward dispatches the installation's normal model events, including AwardAwarded where declared.
-            $award = (new UserAward())->forceFill($identity + ['vuscg_qualification_owner' => $marker]);
-            if (!$award->save()) {
+            $award = new UserAward();
+            $modelConnection = $award->getConnectionName();
+            if (!$award->forceFill($identity + ['vuscg_qualification_owner' => $marker])->save()) {
                 throw new DomainException('award_model_refused_save');
             }
+            // Deferred native listeners must be able to restore the model after the scoped writer closes.
+            $award->setConnection($modelConnection);
         });
     }
 

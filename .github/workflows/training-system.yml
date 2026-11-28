@@ -16,27 +16,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - version: '5.7.44'
-            image: mysql:5.7.44
-          - version: '8.4'
-            image: mysql:8.4
+        version: ['5.7.44', '8.4']
     name: Training tests (MySQL ${{ matrix.version }})
-    services:
-      mysql:
-        image: ${{ matrix.image }}
-        env:
-          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
-          MYSQL_DATABASE: vuscg_training_test
-          MYSQL_USER: training_test
-          MYSQL_PASSWORD: training_test_local_only
-        ports:
-          - 3306/tcp
-        options: >-
-          --health-cmd="mysqladmin --protocol TCP -h 127.0.0.1 ping --silent"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=25
     steps:
       - uses: actions/checkout@v5
         with:
@@ -46,16 +27,6 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - run: npm run check
-      - run: test -n "$TRAINING_TEST_MYSQL_PORT" && npm test
+      - run: bash scripts/test-training-release.sh "$MYSQL_TEST_VERSION"
         env:
-          TRAINING_TEST_MYSQL_VERSION: ${{ matrix.version }}
-          TRAINING_TEST_MYSQL_PORT: ${{ job.services.mysql.ports[3306] }}
-      - name: PHP 8.1 lint and qualification synchronization policy tests
-        run: |
-          docker run --rm -v "$PWD:/repo:ro" -w /repo php:8.1-cli sh -ec '
-            find integrations/phpvms7 -name "*.php" -print0 | xargs -0 -n1 php -l
-            php integrations/phpvms7/tests/QualificationNativePlanTest.php
-            php integrations/phpvms7/tests/TraineeRatingPlanTest.php
-            php integrations/phpvms7/tests/PirepDecisionGateTest.php
-          '
+          MYSQL_TEST_VERSION: ${{ matrix.version }}

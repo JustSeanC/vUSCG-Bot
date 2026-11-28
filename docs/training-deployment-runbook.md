@@ -44,12 +44,12 @@ MySQL 5.7.44 and MySQL 8.4 with InnoDB are tested with distinct training migrati
 | [007](../migrations/007_training_native_ownership.sql) | 006 and positively verified native pivots, ALTER/INDEX | Adds a nullable unique ownership marker to each opted-in pivot. Existing assignments remain unmarked. Apply each statement once, individually. Review storage, metadata locks and whether native models can safely preserve the marker. |
 | [008](../migrations/008_training_materials_and_delivery.sql) | 004–006, CREATE, INDEX, REFERENCES, seed INSERT/UPDATE | Adds categories, links, event snapshots and delivery audits. Repeat preserves records and configuration. 007 is required only for the enabled native targets. |
 
-Apply only verified, unapplied statements. For a fresh training schema, set `TRAINING_MIGRATION_DIR` to the path returned by the preflight (`migrations/mysql57` on 5.7.44 or `migrations` on 8.4). For each file, verify the server, selected staging schema and previous step before running its command from the reviewed checkout:
+Apply only verified, unapplied statements. For a fresh training schema, set `TRAINING_MIGRATION_DIR` to the path returned by the preflight (`migrations/mysql57` on 5.7.44 or `migrations` on 8.4). For each file, verify the server, selected staging schema and previous step before running its command from the reviewed checkout. Use the session initializer for 007, 008 and other manually applied write files as well.
 
 ~~~bash
-mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < "$TRAINING_MIGRATION_DIR/004_training_records.sql"
-mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < "$TRAINING_MIGRATION_DIR/005_training_pirep_link.sql"
-mysql --login-path="$MIGRATION_LOGIN_PATH" "$APP_DB" < "$TRAINING_MIGRATION_DIR/006_training_qualifications.sql"
+mysql --login-path="$MIGRATION_LOGIN_PATH" --skip-reconnect --init-command="SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" "$APP_DB" < "$TRAINING_MIGRATION_DIR/004_training_records.sql"
+mysql --login-path="$MIGRATION_LOGIN_PATH" --skip-reconnect --init-command="SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" "$APP_DB" < "$TRAINING_MIGRATION_DIR/005_training_pirep_link.sql"
+mysql --login-path="$MIGRATION_LOGIN_PATH" --skip-reconnect --init-command="SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'" "$APP_DB" < "$TRAINING_MIGRATION_DIR/006_training_qualifications.sql"
 ~~~
 
 Apply the bridge nonce schema separately before authenticated staging calls. Apply each verified 007 ALTER from the committed file separately, with the targets disabled. Record partial completion and compare the preflight and SHOW CREATE TABLE after each statement. A different pivot or Laravel authorization model blocks that target. Existing deployments should inventory 001–003 and preserve CGAS data. Apply 008 after 006 and any approved 007 statements. Keep strict mode and foreign-key enforcement enabled on application sessions. Follow the linked P07 recovery procedure if root 004 or 006 was previously run on 5.7.
@@ -74,7 +74,7 @@ The state/event mismatch result must be empty. Review duplicate or missing links
 ## 3. Website preparation
 
 1. Back up VuscgCustom and its configuration. For bridge testing, copy the approved bridge controller, Services/PirepDecisionGate.php and config/vuscg_pirep_review.php to their matching paths. Merge the bridge route group into the installed API file and preserve unrelated module routes. Verify HTTPS trusted proxies, path prefix, body limits, UTC clocks, nonce expiry and rate limits. Supply a dedicated secret through environment settings.
-2. Copy the approved Console/SyncQualifications.php, Services/QualificationNativePlan.php and config/vuscg_qualifications.php to their matching paths. Merge console registration in the installed provider as described in the [P04 guide](training-p04.md). Use the verified existing native model/event APIs and retain all other module functionality.
+2. Copy the approved Console/SyncQualifications.php, Services/NativeSyncDatabase.php, Services/QualificationNativePlan.php, Services/TraineeRatingPlan.php and config/vuscg_qualifications.php to their matching paths. Merge console registration in the installed provider as described in the [P04 guide](training-p04.md). Use the verified existing native model/event APIs and retain all other module functionality.
 3. Keep PIREP_BRIDGE_DECISIONS_ENABLED, VUSCG_QUALIFICATION_SYNC_ENABLED, VUSCG_TYPE_RATING_SYNC_ENABLED, VUSCG_IP_ROLE_SYNC_ENABLED, and VUSCG_TRAINEE_RATING_SYNC_ENABLED false. Keep schedules stopped. In the verified phpVMS installation directory run:
 
    ~~~bash

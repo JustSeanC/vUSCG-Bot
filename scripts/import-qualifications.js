@@ -1,7 +1,7 @@
 const { createHash } = require('node:crypto');
 const { readFile, stat } = require('node:fs/promises');
 const { parseArgs } = require('node:util');
-const mysql = require('mysql2/promise');
+const { createStrictPool } = require('../utils/databasePool');
 const { first, findPilot } = require('../utils/training/service');
 const { catalogEntry } = require('../utils/training/qualifications');
 const { TrainingError, code, trainingDate } = require('../utils/training/validation');
@@ -70,7 +70,7 @@ async function main() {
   const rows = JSON.parse(await readFile(filename, 'utf8'));
   const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
   if (!DB_HOST || !DB_USER || !DB_NAME) throw new TrainingError('Configure the target training database.');
-  const db = mysql.createPool({ host: DB_HOST, user: DB_USER, password: DB_PASSWORD, database: DB_NAME });
+  const db = createStrictPool({ host: DB_HOST, user: DB_USER, password: DB_PASSWORD, database: DB_NAME });
   try {
     const report = await importQualifications(db, rows, { dataset: values.dataset, stage: values.stage });
     const counts = {};
